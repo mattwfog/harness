@@ -121,7 +121,8 @@ let git_commit (cfg : config) (req : Effects.commit_req) : Effects.commit_result
 (* Run argv with [stdin_text] on stdin; return (exit code, stdout). Used for
    the judge transport, which must not put a credential in argv (visible in
    the process table) or in a log file. *)
-let run_with_stdin ~(argv : string list) ~(stdin_text : string) : int * string =
+let run_with_stdin ~(argv : string list) ~(stdin_text : string)
+    ~(timeout_s : int) : int * string =
   let in_r, in_w = Unix.pipe ~cloexec:true () in
   let out_r, out_w = Unix.pipe ~cloexec:true () in
   let pid =
@@ -133,15 +134,38 @@ let run_with_stdin ~(argv : string list) ~(stdin_text : string) : int * string =
   let oc = Unix.out_channel_of_descr in_w in
   (try output_string oc stdin_text with Sys_error _ -> ());
   (try close_out oc with Sys_error _ -> ());
-  let ic = Unix.in_channel_of_descr out_r in
-  let out = In_channel.input_all ic in
-  close_in ic;
-  let code =
-    match snd (Unix.waitpid [] pid) with
-    | Unix.WEXITED c -> c
-    | Unix.WSIGNALED _ | Unix.WSTOPPED _ -> 255
+  let deadline = Unix.gettimeofday () +. Float.of_int timeout_s in
+  let buf = Buffer.create 4096 in
+  let chunk = Bytes.create 65536 in
+  let timed_out = ref false in
+  let rec pump () =
+    let remaining = deadline -. Unix.gettimeofday () in
+    if remaining <= 0.0 then timed_out := true
+    else
+      match Unix.select [ out_r ] [] [] remaining with
+      | [], _, _ -> timed_out := true
+      | _ -> (
+          match Unix.read out_r chunk 0 (Bytes.length chunk) with
+          | 0 -> ()
+          | n ->
+              Buffer.add_subbytes buf chunk 0 n;
+              pump ()
+          | exception Unix.Unix_error (Unix.EINTR, _, _) -> pump ())
+      | exception Unix.Unix_error (Unix.EINTR, _, _) -> pump ()
   in
-  (code, out)
+  pump ();
+  Unix.close out_r;
+  if !timed_out then (
+    (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ());
+    ignore (Unix.waitpid [] pid);
+    failwith (Printf.sprintf "timed out after %ds" timeout_s))
+  else
+    let code =
+      match snd (Unix.waitpid [] pid) with
+      | Unix.WEXITED c -> c
+      | Unix.WSIGNALED _ | Unix.WSTOPPED _ -> 255
+    in
+    (code, Buffer.contents buf)
 
 let judge_endpoint = "https://api.typesafe.ai/v1/systemone"
 
@@ -177,31 +201,43 @@ let judge_body (req : Effects.judge_req) : Yojson.Safe.t =
              req.questions) );
     ]
 
+(* Parsing is total: whatever the service returns, the outcome is either a
+   well-formed result (every question answered with a probability in 0..1) or
+   a Failure the caller can fall back on — never an escaping parser error. *)
 let judge_result_of_response (req : Effects.judge_req) (text : string) :
     Effects.judge_result =
-  let open Yojson.Safe.Util in
   let json =
     try Yojson.Safe.from_string text
     with _ -> failwith "judge: response was not JSON"
   in
+  let member key = function
+    | `Assoc fields -> Option.value ~default:`Null (List.assoc_opt key fields)
+    | _ -> `Null
+  in
   let answers = member "answers" json in
   let probability (q : Effects.noul_question) =
-    match member "noul" (member q.qid answers) with
-    | `Float f -> (q.qid, f)
-    | `Int i -> (q.qid, float_of_int i)
-    | _ -> failwith (Printf.sprintf "judge: no noul answer for %s" q.qid)
+    let p =
+      match member "noul" (member q.qid answers) with
+      | `Float f -> f
+      | `Int i -> float_of_int i
+      | _ -> failwith (Printf.sprintf "judge: no noul answer for %s" q.qid)
+    in
+    if Float.is_nan p || p < 0.0 || p > 1.0 then
+      failwith (Printf.sprintf "judge: probability for %s is outside 0..1" q.qid)
+    else (q.qid, p)
   in
-  let int_at path =
-    match List.fold_left (fun j k -> member k j) json path with
-    | `Int i -> i
-    | _ -> 0
-  in
+  let int_at a b = match member b (member a json) with `Int i -> i | _ -> 0 in
   {
     Effects.probabilities = List.map probability req.questions;
-    model_used = (match member "model" json with `String s -> s | _ -> req.model);
-    input_tokens = int_at [ "usage"; "input_tokens" ];
-    output_tokens = int_at [ "usage"; "output_tokens" ];
+    model_used = (match member "model" json with `String m -> m | _ -> req.model);
+    input_tokens = int_at "usage" "input_tokens";
+    output_tokens = int_at "usage" "output_tokens";
   }
+
+let judge_timeout_s () =
+  match Option.bind (Sys.getenv_opt "HARNESS_JUDGE_TIMEOUT_S") int_of_string_opt with
+  | Some t when t > 0 -> t
+  | _ -> 30
 
 (* The judge transport. HARNESS_JUDGE_CMD, when set, replaces the network:
    the request body goes to that shell command's stdin and its stdout is the
@@ -212,7 +248,10 @@ let judge (req : Effects.judge_req) : Effects.judge_result =
   let body = Yojson.Safe.to_string (judge_body req) in
   match Sys.getenv_opt "HARNESS_JUDGE_CMD" with
   | Some cmd when String.trim cmd <> "" ->
-      let code, out = run_with_stdin ~argv:[ "sh"; "-c"; cmd ] ~stdin_text:body in
+      let code, out =
+        run_with_stdin ~argv:[ "sh"; "-c"; cmd ] ~stdin_text:body
+          ~timeout_s:(judge_timeout_s ())
+      in
       if code <> 0 then failwith (Printf.sprintf "judge command exited %d" code)
       else judge_result_of_response req out
   | _ -> (
@@ -233,11 +272,11 @@ let judge (req : Effects.judge_req) : Effects.judge_result =
                 run_with_stdin
                   ~argv:
                     [
-                      "curl"; "-sS"; "--max-time"; "30"; "-K"; "-"; "-X"; "POST";
+                      "curl"; "-sS"; "--max-time"; string_of_int (judge_timeout_s ()); "-K"; "-"; "-X"; "POST";
                       judge_endpoint; "-H"; "Content-Type: application/json";
                       "--data-binary"; "@" ^ body_path; "-w"; "\n%{http_code}";
                     ]
-                  ~stdin_text:config
+                  ~stdin_text:config ~timeout_s:(judge_timeout_s () + 5)
               in
               if code <> 0 then failwith (Printf.sprintf "judge: curl exited %d" code);
               let out = String.trim out in
@@ -292,7 +331,9 @@ let run (cfg : config) (fn : unit -> 'a) : 'a =
                 (fun (k : (b, _) continuation) ->
                   match judge req with
                   | res -> continue k res
-                  | exception e -> discontinue k e)
+                  | exception (Failure _ as e) -> discontinue k e
+                  | exception e ->
+                      discontinue k (Failure ("judge: " ^ Printexc.to_string e)))
           | Effects.Note _ ->
               (* Notes are journal-only; the world ignores them. *)
               Some (fun (k : (b, _) continuation) -> continue k ())

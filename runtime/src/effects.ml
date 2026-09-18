@@ -93,7 +93,19 @@ let exec_req_json (r : exec_req) : Yojson.Safe.t =
       ("argv", `List (List.map (fun a -> `String a) r.argv));
       ("cwd", `String r.cwd);
       ("timeout_s", `Int r.timeout_s);
-      ("env_extra", `List (List.map (fun (k, _) -> `String k) r.env_extra));
+      (* Names plus a digest of each value: a value may be a secret, so it is
+         never journaled, but a CHANGED value (a drifted prompt handed to a
+         cmd: runner through the environment) must still diverge on replay. *)
+      ( "env_extra",
+        `List
+          (List.map
+             (fun (k, v) ->
+               `Assoc
+                 [
+                   ("name", `String k);
+                   ("md5", `String (Digest.to_hex (Digest.string v)));
+                 ])
+             r.env_extra) );
     ]
 
 let exec_result_json ~(cap : int) (r : exec_result) : Yojson.Safe.t =

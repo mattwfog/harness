@@ -95,7 +95,7 @@ Request `data`:
 | `argv` | array of strings | Program and arguments; no implicit shell is added. |
 | `cwd` | string | Working directory. |
 | `timeout_s` | integer | Timeout in seconds. |
-| `env_extra` | array of strings | Names of extra environment variables. Their values are not journaled. |
+| `env_extra` | array of objects | One `{"name","md5"}` per extra environment variable. Values are never journaled (they may be secrets); the digest makes a changed value — such as a drifted prompt handed to a `cmd:` runner through `HARNESS_PROMPT` — diverge on replay. |
 
 The effect request also contains `log_hint`, but its canonical journal
 encoding omits that field.
@@ -162,6 +162,12 @@ make a recorded run non-reproducible.
 
 Notes have phase `note`, use their arbitrary label as `kind`, and preserve the
 caller-provided JSON value as `data`. They therefore have no fixed data schema.
+
+Notes the fleet program emits include `recall` (lessons injected),
+`recall_judged` (per-lesson probabilities and the threshold),
+`recall_judge_unavailable` (the judge was denied or failed; substring recall
+was used), `scope_violation` (tracked files changed outside the task's owned
+paths, with the paths) and `scope_strays` (new untracked files outside them).
 
 ### Denials for any paired kind
 

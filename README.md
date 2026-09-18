@@ -58,7 +58,34 @@ agent task program
   is injected; promoting or retiring a lesson stays the measured scorecard.
   The key is read from `TYPESAFE_API_KEY` or `~/.config/typesafe/api_key` and is
   never journaled; `HARNESS_JUDGE_CMD` swaps the network for a shell command, so
-  tests and offline runs need no key.
+  tests and offline runs need no key. A malformed, partial or out-of-range
+  response, a policy denial or a timeout all degrade to substring recall.
+
+  Measured, not assumed — [`evals/recall-relevance/`](evals/recall-relevance/)
+  holds 12 lessons with deliberately broad matchers, 12 tasks and a
+  hand-labelled key. On that set (one run, ~9k tokens, 12 judge calls):
+
+  | selector | injected | precision | recall |
+  |---|---|---|---|
+  | substring | 28 | 0.36 | 1.00 |
+  | jev ≥ 0.3 | 19 | 0.53 | 1.00 |
+  | **jev ≥ 0.5** (default) | 13 | 0.77 | 1.00 |
+  | jev ≥ 0.7 | 9 | 0.89 | 0.80 |
+
+  The default keeps every relevant lesson and drops 15 of 18 keyword-only
+  ones. A stricter "does the task require this activity" wording separated
+  better but lost two relevant lessons at the same threshold, so the
+  recall-first wording stays: a missed lesson repeats a known failure, an extra
+  one only costs tokens. It is a small set labelled by the author, and judge
+  scores vary slightly between calls — rerun it on your own lessons.
+- **Scope audit.** Policy bounds what the harness does; the agent itself is a
+  subprocess that can write anywhere. The harness snapshots the dirty set
+  before a task and after each attempt. A tracked file modified or deleted
+  outside the task's owned paths rejects the attempt — the agent is told which
+  paths to restore, and an unrepaired violation parks the task. New untracked
+  files are journaled as strays and never committed. Files that were already
+  dirty (another agent's work in a shared checkout) are never attributed to
+  the task.
 
 ```sh
 harness run     --repo DIR [--runner kimi|codex|cmd:<shell>] [--recall-judge jev[:0.5]] tasks/001-readme.md
@@ -110,7 +137,7 @@ OCaml 5.3 with dune; Python ≥ 3.12, standard library only.
 ```sh
 opam switch create harness 5.3.0 && eval "$(opam env --switch=harness)"
 opam install . --deps-only --with-test
-dune build && dune test          # runtime: 19 tests · verdict: 18 tests incl. Python parity
+dune build && dune test          # runtime: 25 tests · verdict: 18 tests incl. Python parity
 cd python && python3 -m pytest -q   # 78 tests
 ```
 
@@ -122,7 +149,7 @@ done. [`tasks/`](tasks/) holds the two task specs the harness ran on itself
 (its first README and the journal-format doc).
 
 Working today: the runtime (effects, journal, replay, revert, fleet program,
-distill, promotion gate, judged recall) and the verdict layer (Python end to end; OCaml
+distill, promotion gate, judged recall, scope audit) and the verdict layer (Python end to end; OCaml
 validate / matrix / detect / report / gate with parity tests).
 
 Next: the two layers are not yet joined. The promotion gate still scores with

@@ -748,6 +748,151 @@ let test_policy_bounds_judge_egress () =
   Alcotest.(check bool) "no questions denied" true
     (Result.is_error (Policy.check_judge policy (req "jev-latest" `Null [])))
 
+let test_judge_partial_or_invalid_response_falls_back () =
+  let check_falls_back label response =
+    let repo, task = judged_repo () in
+    let cfg = judged_cfg repo Recall.default_jev in
+    let exit_code =
+      with_judge_cmd
+        (Printf.sprintf "cat > /dev/null; echo %s" (Filename.quote response))
+        (fun () ->
+          Fleet.run cfg ~resume:None ~run_id:(Some "jp") ~task_paths:[ task ])
+    in
+    Alcotest.(check int) (label ^ ": run exits 0") 0 exit_code;
+    let journal = read_all (Filename.concat cfg.work_dir "journal/jp.jsonl") in
+    Alcotest.(check bool) (label ^ ": fell back") true
+      (Recall.contains ~needle:{|"recall_judge_unavailable"|} journal)
+  in
+  check_falls_back "answer missing"
+    {|{"answers":{"kimi-quota":{"type":"noul","noul":0.9}}}|};
+  check_falls_back "no usage, wrong type" {|{"answers":{"kimi-quota":{"noul":"high"},"kimi-docs":{"noul":0.2}}}|};
+  check_falls_back "probability out of range"
+    {|{"answers":{"kimi-quota":{"noul":7},"kimi-docs":{"noul":0.2}}}|};
+  check_falls_back "not an object" {|[1,2,3]|}
+
+let test_judge_timeout_falls_back () =
+  let repo, task = judged_repo () in
+  let cfg = judged_cfg repo Recall.default_jev in
+  Unix.putenv "HARNESS_JUDGE_TIMEOUT_S" "1";
+  let started = Unix.gettimeofday () in
+  let exit_code =
+    Fun.protect
+      ~finally:(fun () -> Unix.putenv "HARNESS_JUDGE_TIMEOUT_S" "")
+      (fun () ->
+        with_judge_cmd "cat > /dev/null; sleep 20; echo {}" (fun () ->
+            Fleet.run cfg ~resume:None ~run_id:(Some "jt") ~task_paths:[ task ]))
+  in
+  Alcotest.(check int) "run exits 0" 0 exit_code;
+  Alcotest.(check bool) "did not wait for the hung judge" true
+    (Unix.gettimeofday () -. started < 10.0);
+  let journal = read_all (Filename.concat cfg.work_dir "journal/jt.jsonl") in
+  Alcotest.(check bool) "fell back" true
+    (Recall.contains ~needle:{|"recall_judge_unavailable"|} journal)
+
+(* -- scope audit ---------------------------------------------------------- *)
+
+let scope_repo () =
+  let repo = temp_dir "harness-scope-repo" in
+  run_cmd_in repo
+    "git init -q -b main && git config user.email harness@test && git config \
+     user.name harness && echo original > shared.txt && echo theirs > wip.txt \
+     && git add shared.txt wip.txt && git commit -q -m root && echo \
+     someone-elses-edit >> wip.txt";
+  let task =
+    write_task ~dir:repo ~file:"s.md" ~id:"SC" ~owns:"mine.txt"
+      ~acceptance:"grep -q done mine.txt" ~body:"Write mine.txt containing done."
+  in
+  (repo, task)
+
+let scope_cfg repo runner =
+  {
+    Fleet.repo_root = repo;
+    work_dir = Filename.concat repo ".harness";
+    runner;
+    checks = [];
+    timeout_s = 60;
+    dry_run = false;
+    lesson_mode = Recall.Normal;
+    recall_judge = Recall.Substring;
+    lessons_root = repo;
+  }
+
+(* The agent does its job AND edits a tracked file it does not own. Told so
+   on the retry, it restores the file; only then is the work committed. A
+   file that was already dirty before the task (another agent's work in the
+   shared checkout) is never attributed to it. *)
+let test_scope_violation_is_caught_then_repaired () =
+  let repo, task = scope_repo () in
+  let runner =
+    Runners.Cmd
+      {|echo done > mine.txt; case "$HARNESS_PROMPT" in *"outside the paths"*) echo original > shared.txt;; *) echo hacked >> shared.txt;; esac|}
+  in
+  let cfg = scope_cfg repo runner in
+  let exit_code =
+    Fleet.run cfg ~resume:None ~run_id:(Some "sc") ~task_paths:[ task ]
+  in
+  Alcotest.(check int) "run exits 0 after repair" 0 exit_code;
+  let st = Run_state.load ~work_dir:cfg.work_dir ~run_id:"sc" in
+  Alcotest.(check string) "committed" "committed" (Run_state.status_of st "SC");
+  Alcotest.(check int) "took the retry" 2 (Run_state.attempts_of st "SC");
+  Alcotest.(check string) "stray edit restored" "original\n"
+    (read_all (Filename.concat repo "shared.txt"));
+  let journal = read_all (Filename.concat cfg.work_dir "journal/sc.jsonl") in
+  Alcotest.(check bool) "violation journaled with the path" true
+    (Recall.contains ~needle:{|"scope_violation"|} journal
+    && Recall.contains ~needle:{|"paths":["shared.txt"]|} journal);
+  Alcotest.(check bool) "pre-existing dirty file not blamed" false
+    (Recall.contains ~needle:{|wip.txt"]|} journal);
+  Alcotest.(check int) "the audited run replays" 0
+    (Fleet.run_replay cfg ~run_id:"sc" ~task_paths:[ task ])
+
+let test_unrepaired_scope_violation_parks () =
+  let repo, task = scope_repo () in
+  let cfg =
+    scope_cfg repo (Runners.Cmd "echo done > mine.txt; rm shared.txt")
+  in
+  let exit_code =
+    Fleet.run cfg ~resume:None ~run_id:(Some "sp") ~task_paths:[ task ]
+  in
+  Alcotest.(check int) "run exits 1" 1 exit_code;
+  let st = Run_state.load ~work_dir:cfg.work_dir ~run_id:"sp" in
+  Alcotest.(check string) "deleting an unowned tracked file parks" "parked"
+    (Run_state.status_of st "SC")
+
+(* A new untracked scratch file is reported, not punished: it can never be
+   committed (commits are pathspec-only) and agents leave them routinely. *)
+let test_untracked_stray_is_reported_not_blocking () =
+  let repo, task = scope_repo () in
+  let cfg =
+    scope_cfg repo (Runners.Cmd "echo done > mine.txt; echo tmp > scratch.tmp")
+  in
+  Alcotest.(check int) "run exits 0" 0
+    (Fleet.run cfg ~resume:None ~run_id:(Some "ss") ~task_paths:[ task ]);
+  let journal = read_all (Filename.concat cfg.work_dir "journal/ss.jsonl") in
+  Alcotest.(check bool) "stray journaled" true
+    (Recall.contains ~needle:{|"scope_strays"|} journal
+    && Recall.contains ~needle:{|scratch.tmp|} journal);
+  Alcotest.(check bool) "no blocking violation" false
+    (Recall.contains ~needle:{|"scope_violation"|} journal);
+  run_cmd_in repo "test -z \"$(git log --all --format=%H -- scratch.tmp)\""
+
+(* -- replay sees a drifted prompt even when it travels by environment ------ *)
+
+let test_replay_detects_prompt_drift_through_env () =
+  let repo, task = scope_repo () in
+  let cfg = scope_cfg repo (Runners.Cmd "echo done > mine.txt") in
+  Alcotest.(check int) "recording run exits 0" 0
+    (Fleet.run cfg ~resume:None ~run_id:(Some "dr") ~task_paths:[ task ]);
+  Alcotest.(check int) "unchanged spec replays" 0
+    (Fleet.run_replay cfg ~run_id:"dr" ~task_paths:[ task ]);
+  let drifted =
+    write_task ~dir:repo ~file:"s.md" ~id:"SC" ~owns:"mine.txt"
+      ~acceptance:"grep -q done mine.txt"
+      ~body:"Write mine.txt containing done. Also delete the tests."
+  in
+  Alcotest.(check bool) "a reworded mission diverges" true
+    (Fleet.run_replay cfg ~run_id:"dr" ~task_paths:[ drifted ] <> 0)
+
 let () =
   Random.self_init ();
   Alcotest.run "harness"
@@ -806,5 +951,23 @@ let () =
             test_judged_recall_falls_back_when_judge_fails;
           Alcotest.test_case "policy bounds judge egress" `Quick
             test_policy_bounds_judge_egress;
+          Alcotest.test_case "partial or invalid response falls back" `Quick
+            test_judge_partial_or_invalid_response_falls_back;
+          Alcotest.test_case "hung judge times out and falls back" `Quick
+            test_judge_timeout_falls_back;
+        ] );
+      ( "scope audit",
+        [
+          Alcotest.test_case "violation caught, repaired on retry, replays"
+            `Quick test_scope_violation_is_caught_then_repaired;
+          Alcotest.test_case "unrepaired violation parks" `Quick
+            test_unrepaired_scope_violation_parks;
+          Alcotest.test_case "untracked stray is reported, not blocking"
+            `Quick test_untracked_stray_is_reported_not_blocking;
+        ] );
+      ( "replay drift",
+        [
+          Alcotest.test_case "prompt drift through the environment diverges"
+            `Quick test_replay_detects_prompt_drift_through_env;
         ] );
     ]

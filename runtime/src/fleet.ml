@@ -83,6 +83,14 @@ let run_task (cfg : config) (state : Run_state.t) (task : Task_spec.t) : string
          ~runner:(Runners.to_string cfg.runner)
          ~mode:cfg.lesson_mode ())
   in
+  (* Scope audit baseline: the dirty set before this task touches anything. *)
+  let ignore_prefixes =
+    Option.to_list (Scope.relative_to ~root:cfg.repo_root cfg.work_dir)
+  in
+  let baseline =
+    Scope.snapshot ~repo_root:cfg.repo_root ~timeout_s:cfg.timeout_s
+      ~log_hint:(task.id ^ ".scope-baseline")
+  in
   let rec attempt failure_context =
     if Run_state.attempts_of state task.id >= max_attempts then (
       Run_state.transition state task.id ~status:"parked"
@@ -119,6 +127,36 @@ let run_task (cfg : config) (state : Run_state.t) (task : Task_spec.t) : string
                    String.sub o (String.length o - cap) cap
                  else o))))
       else
+        let { Scope.violations = out_of_scope; strays } =
+          Scope.audit ~owns:task.owns ~ignore_prefixes ~before:baseline
+            ~after:
+              (Scope.snapshot ~repo_root:cfg.repo_root ~timeout_s:cfg.timeout_s
+                 ~log_hint:(Printf.sprintf "%s.scope-attempt%d" task.id n))
+        in
+        if strays <> [] then
+          note "scope_strays"
+            [
+              ("task", `String task.id);
+              ("attempt", `Int n);
+              ("paths", `List (List.map (fun p -> `String p) strays));
+            ];
+        if out_of_scope <> [] then (
+          note "scope_violation"
+            [
+              ("task", `String task.id);
+              ("attempt", `Int n);
+              ("paths", `List (List.map (fun p -> `String p) out_of_scope));
+            ];
+          Run_state.transition state task.id ~status:"scope_violation" ();
+          attempt
+            (Some
+               (Printf.sprintf
+                  "You changed files outside the paths this task owns: %s\n\
+                   Restore each of them to exactly its previous content, and \
+                   change only: %s"
+                  (String.concat ", " out_of_scope)
+                  (String.concat ", " task.owns))))
+        else
         match
           Catcher.verify ~task ~repo_root:cfg.repo_root ~checks:cfg.checks
             ~timeout_s:cfg.timeout_s
