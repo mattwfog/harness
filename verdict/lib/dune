@@ -1,0 +1,3 @@
+(library
+ (name dispobench_core)
+ (libraries yojson re digestif unix))

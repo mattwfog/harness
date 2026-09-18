@@ -1,0 +1,5 @@
+(test
+ (name test_harness)
+ (libraries harness_lib alcotest yojson)
+ (deps
+  (glob_files fixtures/*)))

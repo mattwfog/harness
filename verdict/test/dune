@@ -1,0 +1,12 @@
+(test
+ (name core_test)
+ (libraries dispobench_core alcotest unix))
+
+(test
+ (name cli_test)
+ (libraries dispobench_core alcotest unix)
+ (deps ../bin/main.exe))
+
+(test
+ (name parity_test)
+ (libraries dispobench_core alcotest unix))

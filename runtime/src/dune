@@ -1,0 +1,4 @@
+(library
+ (name harness_lib)
+ (public_name harness)
+ (libraries unix yojson otoml))
