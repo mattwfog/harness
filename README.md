@@ -116,3 +116,7 @@ Next: the two layers are not yet joined. The promotion gate still scores with
 its own scorecard; the plan is a journal → record mapper so every harness run
 is scorable by the verdict detectors, and the gate's promote/retire decision
 becomes a verdict-core call.
+
+## License
+
+[MIT](LICENSE).

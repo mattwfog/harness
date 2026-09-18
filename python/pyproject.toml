@@ -3,6 +3,7 @@ name = "dispobench"
 version = "0.1.0"
 description = "Reproducible, composable, MECE evaluation platform for production LLM agents"
 requires-python = ">=3.12"
+license = { text = "MIT" }
 dependencies = []
 
 [tool.pytest.ini_options]

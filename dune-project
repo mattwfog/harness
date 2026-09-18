@@ -1,6 +1,7 @@
 (lang dune 3.11)
 (name harness)
 (generate_opam_files true)
+(license MIT)
 
 (package
  (name harness)
