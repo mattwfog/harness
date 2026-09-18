@@ -97,6 +97,20 @@ harness lessons --repo DIR                   # list the lesson corpus and status
 harness gate    --repo DIR --runner codex LESSON_ID EVAL.md…   # eval tasks use the same task format
 ```
 
+### Running an untrusted model as the agent
+
+[`examples/sandboxed-agent/run.sh`](examples/sandboxed-agent/run.sh) runs a task
+with any OpenRouter model as the agent inside a macOS sandbox profile: no reads
+of `/Users` or `/Volumes`, writes confined to a throwaway directory, a scrubbed
+environment, a clean agent config. The harness itself never hands its judge
+key to the agent process (tested). Verified with a free model on a real task:
+the agent implemented a function against five failing tests in one attempt,
+its attempt to list the home directory was refused by the sandbox, Jev recall
+injected the relevant lesson (0.93) and dropped the keyword-only one (0.13),
+the scope audit found nothing outside the owned file, and the run then
+replayed — 24 journal entries, agent and judge both swapped for tripwires
+that were never touched.
+
 ## Verdict: deterministic scoring for production agents
 
 The question a team shipping an agent actually has: *did this prompt / tool /
@@ -137,7 +151,7 @@ OCaml 5.3 with dune; Python ≥ 3.12, standard library only.
 ```sh
 opam switch create harness 5.3.0 && eval "$(opam env --switch=harness)"
 opam install . --deps-only --with-test
-dune build && dune test          # runtime: 25 tests · verdict: 18 tests incl. Python parity
+dune build && dune test          # runtime: 26 tests · verdict: 18 tests incl. Python parity
 cd python && python3 -m pytest -q   # 78 tests
 ```
 

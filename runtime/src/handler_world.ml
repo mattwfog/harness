@@ -27,6 +27,8 @@ let write_file path content =
   close_out oc;
   Sys.rename tmp path
 
+let harness_only_env = [ "TYPESAFE_API_KEY" ]
+
 (* Run argv (no shell), teeing combined stdout+stderr to a log file, with a
    hard timeout (SIGKILL). Returns the combined output and timing. *)
 let exec (cfg : config) (req : Effects.exec_req) : Effects.exec_result =
@@ -40,16 +42,32 @@ let exec (cfg : config) (req : Effects.exec_req) : Effects.exec_result =
   output_string log (Printf.sprintf "$ %s\n" (String.concat " " req.argv));
   flush log;
   let r_fd, w_fd = Unix.pipe ~cloexec:false () in
+  (* The harness's own credentials are not the agent's. The judge key is
+     read by the world handler only; a subprocess never inherits it. *)
+  let inherited =
+    Unix.environment () |> Array.to_list
+    |> List.filter (fun kv ->
+           not
+             (List.exists
+                (fun name -> String.starts_with ~prefix:(name ^ "=") kv)
+                harness_only_env))
+    |> Array.of_list
+  in
   let env =
-    Array.append (Unix.environment ())
+    Array.append inherited
       (Array.of_list
          (List.map (fun (k, v) -> k ^ "=" ^ v) req.env_extra))
   in
   let pid =
-    let saved_cwd = Sys.getcwd () in
+    (* The harness's own cwd may be unreadable (a sandboxed run started from
+       a directory the profile denies); then there is nothing to restore. *)
+    let saved_cwd = try Some (Sys.getcwd ()) with Sys_error _ -> None in
     Sys.chdir req.cwd;
     Fun.protect
-      ~finally:(fun () -> Sys.chdir saved_cwd)
+      ~finally:(fun () ->
+        match saved_cwd with
+        | Some dir -> ( try Sys.chdir dir with Sys_error _ -> ())
+        | None -> ())
       (fun () ->
         Unix.create_process_env (List.hd req.argv) (Array.of_list req.argv) env
           Unix.stdin w_fd w_fd)

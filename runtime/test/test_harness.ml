@@ -876,6 +876,23 @@ let test_untracked_stray_is_reported_not_blocking () =
     (Recall.contains ~needle:{|"scope_violation"|} journal);
   run_cmd_in repo "test -z \"$(git log --all --format=%H -- scratch.tmp)\""
 
+let test_agent_never_inherits_the_judge_key () =
+  let repo, task = scope_repo () in
+  let cfg =
+    scope_cfg repo
+      (Runners.Cmd
+         {|echo done > mine.txt; printf '%s' "${TYPESAFE_API_KEY:-unset}" > mine.key.txt|})
+  in
+  Unix.putenv "TYPESAFE_API_KEY" "secret-for-the-harness-only";
+  let exit_code =
+    Fun.protect
+      ~finally:(fun () -> Unix.putenv "TYPESAFE_API_KEY" "")
+      (fun () -> Fleet.run cfg ~resume:None ~run_id:(Some "ek") ~task_paths:[ task ])
+  in
+  Alcotest.(check int) "run exits 0" 0 exit_code;
+  Alcotest.(check string) "agent process did not see the key" "unset"
+    (read_all (Filename.concat repo "mine.key.txt"))
+
 (* -- replay sees a drifted prompt even when it travels by environment ------ *)
 
 let test_replay_detects_prompt_drift_through_env () =
@@ -955,6 +972,8 @@ let () =
             test_judge_partial_or_invalid_response_falls_back;
           Alcotest.test_case "hung judge times out and falls back" `Quick
             test_judge_timeout_falls_back;
+          Alcotest.test_case "agent never inherits the judge key" `Quick
+            test_agent_never_inherits_the_judge_key;
         ] );
       ( "scope audit",
         [
