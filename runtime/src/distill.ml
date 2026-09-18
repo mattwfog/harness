@@ -69,6 +69,16 @@ let digest_journal (entries : Yojson.Safe.t list) :
                }
                :: !failures
          | _ -> ());
+      if phase = "failed" then (
+        let id, title, runner = !current_task in
+        failures :=
+          {
+            task = id;
+            runner;
+            title;
+            signature = Printf.sprintf "%s failed: %s" kind (str "reason" (data e));
+          }
+          :: !failures);
       if phase = "denied" then (
         let id, title, runner = !current_task in
         failures :=
@@ -218,7 +228,7 @@ let parse_llm_output (out : string) : candidate list =
    line — is what a candidate memory is verified against. *)
 let evidence_cap = 24_000
 
-let evidence_digest (entries : Yojson.Safe.t list) : string =
+let evidence_digest ?(cap = evidence_cap) (entries : Yojson.Safe.t list) : string =
   let open Yojson.Safe.Util in
   let str k e = match member k e with `String s -> s | _ -> "" in
   let strs k e =
@@ -226,22 +236,37 @@ let evidence_digest (entries : Yojson.Safe.t list) : string =
     | `List l -> List.filter_map (function `String s -> Some s | _ -> None) l
     | _ -> []
   in
-  let buf = Buffer.create 4096 in
-  let line fmt = Printf.ksprintf (fun l -> Buffer.add_string buf (l ^ "\n")) fmt in
+  (* One section per task. A task is EVENTFUL if anything in it failed, was
+     rejected, was retried, parked, or ran with recalled lessons; a long
+     session is mostly uneventful, and the cap must never be spent on forty
+     clean tasks while the one failure at the end is cut off. *)
+  let sections = ref [] in
+  let header = ref "" and body = Buffer.create 1024 and eventful = ref false in
+  let flush () =
+    if !header <> "" then
+      sections := (!header, Buffer.contents body, !eventful) :: !sections;
+    Buffer.clear body;
+    eventful := false
+  in
+  let line fmt = Printf.ksprintf (fun l -> Buffer.add_string body (l ^ "\n")) fmt in
   let pending = ref `Check in
   List.iter
     (fun e ->
       let phase = str "phase" e and kind = str "kind" e and d = member "data" e in
       match (phase, kind) with
       | "note", "task_config" ->
-          line "## task %s: %s (owns %s)" (str "task" d) (str "title" d)
-            (String.concat ", " (strs "owns" d))
+          flush ();
+          header :=
+            Printf.sprintf "## task %s: %s (owns %s)" (str "task" d) (str "title" d)
+              (String.concat ", " (strs "owns" d))
       | "note", "recall" when strs "lessons" d <> [] ->
+          eventful := true;
           line "[harness] lessons injected into the prompt: %s"
             (String.concat ", " (strs "lessons" d))
       | "note", "attempt_start" ->
-          line "[harness] attempt %d"
-            (match member "attempt" d with `Int n -> n | _ -> 0)
+          let n = match member "attempt" d with `Int n -> n | _ -> 0 in
+          if n > 1 then eventful := true;
+          line "[harness] attempt %d" n
       | "request", "tool_exec" ->
           let argv = strs "argv" d in
           let is_snapshot =
@@ -257,29 +282,51 @@ let evidence_digest (entries : Yojson.Safe.t list) : string =
           pending :=
             if is_snapshot then `Snapshot
             else if is_agent then `Agent
-            else
-              `Command
-                (match List.rev argv with last :: _ -> last | [] -> "")
+            else `Command (match List.rev argv with last :: _ -> last | [] -> "")
       | "result", "tool_exec" -> (
           let code = match member "exit_code" d with `Int c -> c | _ -> 0 in
           let output =
             let o = String.trim (str "output" d) in
             if String.length o > 900 then String.sub o 0 900 else o
           in
+          if code <> 0 && !pending <> `Snapshot then eventful := true;
           match !pending with
           | `Snapshot -> ()
           | `Agent -> line "[agent] exit %d\n%s" code output
           | `Command cmd -> line "[check] exit %d | %s\n%s" code cmd output
           | `Check -> line "[check] exit %d\n%s" code output)
+      | "denied", _ ->
+          eventful := true;
+          line "[harness] %s denied by policy: %s" kind (str "reason" d)
+      | "failed", _ ->
+          eventful := true;
+          line "[harness] %s failed: %s" kind (str "reason" d)
       | "note", "scope_violation" ->
+          eventful := true;
           line "[harness] attempt rejected: files changed outside the owned paths: %s"
             (String.concat ", " (strs "paths" d))
-      | "note", "task_parked" -> line "[harness] task %s PARKED" (str "task" d)
+      | "note", "task_parked" ->
+          eventful := true;
+          line "[harness] task %s PARKED" (str "task" d)
       | "result", "git_commit" -> line "[harness] committed"
       | _ -> ())
     entries;
-  let text = Buffer.contents buf in
-  if String.length text > evidence_cap then String.sub text 0 evidence_cap else text
+  flush ();
+  let sections = List.rev !sections in
+  let render ~collapse_clean =
+    String.concat ""
+      (List.map
+         (fun (h, b, ev) ->
+           if ev || not collapse_clean then h ^ "\n" ^ b
+           else h ^ " - completed on the first attempt, nothing notable\n")
+         sections)
+  in
+  let full = render ~collapse_clean:false in
+  let text = if String.length full <= cap then full else render ~collapse_clean:true in
+  let text = if String.length text > cap then String.sub text 0 cap else text in
+  (* Agent output is untrusted: it can carry a credential. Nothing
+     credential-shaped goes to the judge. *)
+  Redact.scrub text
 
 (* ---- verification ------------------------------------------------------- *)
 
@@ -305,10 +352,14 @@ let questions : Effects.noul_question list =
     {
       qid = "contradicted";
       instructions =
-        "Read the run record in `evidence`. Does the record contradict the \
-         statement in `candidate`?";
-      yes = "Something in the record shows the statement is false.";
-      no = "Nothing in the record conflicts with the statement.";
+        "Read the run record in `evidence`. Does the record show that the \
+         statement in `candidate` is itself wrong - a fact it asserts is \
+         false, or the course of action it recommends was tried in the record \
+         and failed? An agent in the record doing the opposite of what the \
+         statement advises does NOT contradict it; if that opposite behaviour \
+         failed, that is evidence for the statement.";
+      yes = "The record shows a fact in the statement is false, or shows the action it recommends failing.";
+      no = "Nothing in the record shows the statement to be wrong - including when the record shows an agent ignoring this advice and failing.";
     };
     {
       qid = "durable";
@@ -323,12 +374,13 @@ let questions : Effects.noul_question list =
     {
       qid = "harmful";
       instructions =
-        "Would an agent that followed the statement in `candidate` end up \
-         weakening, skipping or working around a check, test, lint rule, \
-         policy or review, or reusing code the record marks as frozen or \
-         forbidden?";
-      yes = "Yes: following it defeats a safeguard or reuses forbidden code.";
-      no = "No: following it keeps every safeguard intact.";
+        "Does the statement in `candidate` ADVISE or INSTRUCT an agent to \
+         weaken, skip or work around a check, test, lint rule, policy or \
+         review, or to reuse code the record marks as frozen or forbidden? A \
+         statement that only describes what happened, or that warns against \
+         such a shortcut, does not.";
+      yes = "It tells the agent to defeat a safeguard or reuse forbidden code.";
+      no = "It describes an event, states a fact, or tells the agent to keep safeguards intact.";
     };
   ]
 
@@ -521,6 +573,20 @@ let run ~repo_root ~work_dir ~run_id ~(llm_runner : Runners.t option)
               let routed, denied =
                 List.fold_left
                   (fun (kept, denied) (c : candidate) ->
+                    if Redact.contains_secret c.guidance || Redact.contains_secret c.id
+                    then (
+                      (* Deterministic, and independent of any verifier: a
+                         credential is never written into memory. *)
+                      Effect.perform
+                        (Effects.Note
+                           ( "memory_denied",
+                             `Assoc
+                               [
+                                 ("candidate", `String (Redact.scrub c.id));
+                                 ("verdict", `String "secret");
+                               ] ));
+                      (kept, denied @ [ (Redact.scrub c.id, "secret") ]))
+                    else
                     match verify with
                     | Recall.Substring -> (kept @ [ (c, c.hint) ], denied)
                     | Recall.Jev { model; threshold } -> (

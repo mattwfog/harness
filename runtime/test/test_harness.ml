@@ -1082,6 +1082,128 @@ let test_quota_is_an_immediate_memory () =
     (Recall.contains ~needle:{|layer = "immediate"|} text
     && Recall.contains ~needle:"expires = " text)
 
+(* A world failure is not a policy denial: the journal says which, replay
+   reproduces it, and the distiller does not invent a policy lesson from it. *)
+let test_world_failure_is_not_a_policy_denial () =
+  let repo, _ = scope_repo () in
+  let task =
+    write_task ~dir:repo ~file:"w.md" ~id:"W1" ~owns:"never-written.txt"
+      ~acceptance:"true" ~body:"Do nothing."
+  in
+  let cfg = scope_cfg repo (Runners.Cmd "true") in
+  ignore (Fleet.run cfg ~resume:None ~run_id:(Some "wf") ~task_paths:[ task ]);
+  let journal = read_all (Filename.concat cfg.work_dir "journal/wf.jsonl") in
+  Alcotest.(check bool) "journaled as failed" true
+    (Recall.contains ~needle:{|"phase":"failed","kind":"git_commit"|} journal);
+  Alcotest.(check bool) "not journaled as denied" false
+    (Recall.contains ~needle:{|"phase":"denied"|} journal);
+  Alcotest.(check int) "the failure replays" 0
+    (Fleet.run_replay cfg ~run_id:"wf" ~task_paths:[ task ]);
+  ignore
+    (Distill.run ~repo_root:repo ~work_dir:cfg.work_dir ~run_id:"wf"
+       ~llm_runner:None ~verify:Recall.Substring ~timeout_s:60);
+  Alcotest.(check bool) "no policy lesson invented" false
+    (Sys.file_exists (lesson_file repo "policy-w1"))
+
+(* -- secrets and long sessions --------------------------------------------- *)
+
+let test_redaction_shapes () =
+  let kept = "see runtime/src/handler_world.ml and docs/JOURNAL_FORMAT.md, run python3 -m pytest" in
+  Alcotest.(check string) "paths, names and commands are untouched" kept (Redact.scrub kept);
+  Alcotest.(check bool) "prefixed key" true (Redact.contains_secret "token sk-live-EXAMPLE0000EXAMPLE0000 here");
+  Alcotest.(check bool) "opaque long token" true
+    (Redact.contains_secret "value a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4 end");
+  Alcotest.(check bool) "private key block" true (Redact.contains_secret "-----BEGIN PRIVATE KEY-----");
+  Alcotest.(check bool) "ordinary prose" false
+    (Redact.contains_secret "legacy is frozen; build landers on capture then parse");
+  Alcotest.(check string) "scrubbed in place" "token [REDACTED] here"
+    (Redact.scrub "token sk-live-EXAMPLE0000EXAMPLE0000 here")
+
+(* An agent prints a credential. It must reach neither memory nor the judge. *)
+let test_a_leaked_credential_reaches_neither_memory_nor_judge () =
+  let repo, _ = scope_repo () in
+  let task =
+    write_task ~dir:repo ~file:"k.md" ~id:"K1" ~owns:"mine.txt"
+      ~acceptance:"test -s mine.txt" ~body:"Sync the alpha feed."
+  in
+  let cfg =
+    scope_cfg repo
+      (Runners.Cmd {|echo "connecting with token sk-live-EXAMPLE0000EXAMPLE0000"; exit 1|})
+  in
+  ignore (Fleet.run cfg ~resume:None ~run_id:(Some "leak") ~task_paths:[ task ]);
+  let proposer =
+    Runners.Cmd
+      {|printf 'LESSON id: alpha-token\nMATCHERS: alpha\nGUIDANCE: The alpha token is sk-live-EXAMPLE0000EXAMPLE0000; pass it when connecting.\nEND\nLESSON id: alpha-auth\nMATCHERS: alpha\nGUIDANCE: FROZEN: the alpha feed needs a token from the secret store.\nEND\n'|}
+  in
+  let seen = Filename.concat repo "judge-saw.json" in
+  let recording_stub =
+    Printf.sprintf "tee -a %s | %s" (Filename.quote seen) (memory_stub repo)
+  in
+  List.iter
+    (fun verify ->
+      ignore
+        (with_judge_cmd recording_stub (fun () ->
+             Distill.run ~repo_root:repo ~work_dir:cfg.work_dir ~run_id:"leak"
+               ~llm_runner:(Some proposer) ~verify ~timeout_s:60));
+      Alcotest.(check bool) "secret-bearing memory never written" false
+        (Sys.file_exists (lesson_file repo "alpha-token")))
+    [ Recall.Substring; Recall.default_jev ];
+  Alcotest.(check bool) "the clean sibling was still written" true
+    (Sys.file_exists (lesson_file repo "alpha-auth"));
+  List.iter
+    (fun journal ->
+      Alcotest.(check bool) (journal ^ " holds no credential") false
+        (Recall.contains ~needle:"sk-live"
+           (read_all (Filename.concat cfg.work_dir ("journal/" ^ journal)))))
+    [ "leak.jsonl"; "distill-leak.jsonl" ];
+  Alcotest.(check bool) "the judge never saw the credential" false
+    (Sys.file_exists seen && Recall.contains ~needle:"sk-live" (read_all seen));
+  let policy = mk_policy "/tmp" in
+  let q = { Effects.qid = "a"; instructions = "?"; yes = "y"; no = "n" } in
+  Alcotest.(check bool) "policy refuses a judge request carrying a credential" true
+    (Result.is_error
+       (Policy.check_judge policy
+          {
+            Effects.model = "jev-latest";
+            state = `String "key sk-live-EXAMPLE0000EXAMPLE0000";
+            questions = [ q ];
+          }))
+
+(* Ten verbose clean tasks and a small cap, then the one failure that matters. The digest
+   must keep the failure and stay inside its cap. *)
+let test_long_session_keeps_the_failure_at_the_end () =
+  let repo, _ = scope_repo () in
+  let tasks =
+    List.init 10 (fun i ->
+        write_task ~dir:repo ~file:(Printf.sprintf "p%02d.md" i)
+          ~id:(Printf.sprintf "P%02d" i)
+          ~owns:(Printf.sprintf "out/p%02d.txt" i)
+          ~acceptance:(Printf.sprintf "test -s out/p%02d.txt" i)
+          ~body:(Printf.sprintf "Write out/p%02d.txt." i))
+    @ [
+        write_task ~dir:repo ~file:"z.md" ~id:"Z99" ~owns:"keys/rotate.sh"
+          ~acceptance:"test -s keys/rotate.sh && ! grep -q 'rm -rf' keys/rotate.sh"
+          ~body:"Write keys/rotate.sh to rotate the signing key.";
+      ]
+  in
+  let runner =
+    Runners.Cmd
+      {|case "$HARNESS_PROMPT" in *"rotate the signing key"*) mkdir -p keys; printf 'rm -rf keys/old\n' > keys/rotate.sh; echo "ROTATE-WROTE-RM-RF";; *) f=$(printf '%s' "$HARNESS_PROMPT" | grep -o -E 'out/p[0-9]+\.txt' | head -1); mkdir -p out; echo ok > "$f"; i=0; while [ $i -lt 18 ]; do echo "step $i: formatted, linted, type-checked, ran the unit tests, all green, nothing unusual to report"; i=$((i+1)); done;; esac|}
+  in
+  let cfg = scope_cfg repo runner in
+  ignore (Fleet.run cfg ~resume:None ~run_id:(Some "long") ~task_paths:tasks);
+  let digest =
+    Distill.evidence_digest ~cap:6_000
+      (Journal.read_lines (Filename.concat cfg.work_dir "journal/long.jsonl"))
+  in
+  Alcotest.(check bool) "inside the cap" true (String.length digest <= 6_000);
+  Alcotest.(check bool) "the failure at the end survived" true
+    (Recall.contains ~needle:"ROTATE-WROTE-RM-RF" digest
+    && Recall.contains ~needle:"task Z99 PARKED" digest);
+  Alcotest.(check bool) "clean tasks were collapsed, not dropped" true
+    (Recall.contains ~needle:"## task P00" digest
+    && Recall.contains ~needle:"nothing notable" digest)
+
 let () =
   Random.self_init ();
   Alcotest.run "harness"
@@ -1166,6 +1288,19 @@ let () =
             test_contradicted_promoted_lesson_is_demoted;
           Alcotest.test_case "quota is an immediate memory" `Quick
             test_quota_is_an_immediate_memory;
+        ] );
+      ( "world failures",
+        [
+          Alcotest.test_case "a world failure is not a policy denial" `Quick
+            test_world_failure_is_not_a_policy_denial;
+        ] );
+      ( "memory safety",
+        [
+          Alcotest.test_case "redaction shapes" `Quick test_redaction_shapes;
+          Alcotest.test_case "leaked credential reaches neither memory nor judge"
+            `Quick test_a_leaked_credential_reaches_neither_memory_nor_judge;
+          Alcotest.test_case "long session keeps the failure at the end" `Slow
+            test_long_session_keeps_the_failure_at_the_end;
         ] );
       ( "replay drift",
         [

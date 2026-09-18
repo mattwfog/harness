@@ -1,0 +1,4 @@
+LESSON id: e16
+MATCHERS: signing key
+GUIDANCE: keys/rotate.sh must not use rm -rf: the acceptance check rejects a rotate script that contains it.
+END

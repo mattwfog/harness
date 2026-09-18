@@ -93,7 +93,9 @@ let git_commit_req_json (r : commit_req) : Yojson.Safe.t =
 let exec_req_json (r : exec_req) : Yojson.Safe.t =
   `Assoc
     [
-      ("argv", `List (List.map (fun a -> `String a) r.argv));
+      (* Scrubbed: a journal never holds a credential. Capture and replay
+         share this encoding, so scrubbing cannot cause a false divergence. *)
+      ("argv", `List (List.map (fun a -> `String (Redact.scrub a)) r.argv));
       ("cwd", `String r.cwd);
       ("timeout_s", `Int r.timeout_s);
       (* Names plus a digest of each value: a value may be a secret, so it is
@@ -113,7 +115,7 @@ let exec_req_json (r : exec_req) : Yojson.Safe.t =
 
 let exec_result_json ~(cap : int) (r : exec_result) : Yojson.Safe.t =
   let truncated = String.length r.output > cap in
-  let shown = if truncated then String.sub r.output 0 cap else r.output in
+  let shown = Redact.scrub (if truncated then String.sub r.output 0 cap else r.output) in
   `Assoc
     [
       ("exit_code", `Int r.exit_code);

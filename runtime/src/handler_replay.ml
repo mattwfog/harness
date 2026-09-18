@@ -66,12 +66,12 @@ let match_request c ~kind ~(req_json : Yojson.Safe.t) : Yojson.Safe.t =
          { seq = int_field "seq" entry; expected = recorded; got = performed });
   let outcome = next c ~got:(kind ^ " <awaiting result>") in
   let o_phase = str "phase" outcome in
-  if o_phase <> "result" && o_phase <> "denied" then
+  if o_phase <> "result" && o_phase <> "denied" && o_phase <> "failed" then
     raise
       (Divergence
          {
            seq = int_field "seq" outcome;
-           expected = "result|denied";
+           expected = "result|denied|failed";
            got = o_phase;
          });
   outcome
@@ -110,6 +110,16 @@ let answer (type b) c ~kind ~req_json ~(decode : Yojson.Safe.t -> b)
     (k : (b, _) continuation) =
   let outcome = match_request c ~kind ~req_json in
   if str "phase" outcome = "denied" then discontinue k (denial_of outcome)
+  else if str "phase" outcome = "failed" then
+    (* The world failed in the recorded run; it fails the same way now. *)
+    discontinue k
+      (Failure
+         (match field "data" outcome with
+         | `Assoc fields -> (
+             match List.assoc_opt "reason" fields with
+             | Some (`String r) -> r
+             | _ -> "")
+         | _ -> ""))
   else continue k (decode (field "data" outcome))
 
 let run (c : cursor) (fn : unit -> 'a) : 'a =

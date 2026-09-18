@@ -54,6 +54,12 @@ let denied t ~kind ~ref_seq ~reason =
   ignore
     (emit t ~phase:"denied" ~kind ~ref_seq (`Assoc [ ("reason", `String reason) ]))
 
+(* An effect the world could not carry out (a failed git add, a transport
+   error). Distinct from [denied]: policy said nothing; reality did. *)
+let failed t ~kind ~ref_seq ~reason =
+  ignore
+    (emit t ~phase:"failed" ~kind ~ref_seq (`Assoc [ ("reason", `String reason) ]))
+
 let note t ~label data =
   ignore (emit t ~phase:"note" ~kind:label data)
 

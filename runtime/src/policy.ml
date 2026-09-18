@@ -117,6 +117,8 @@ let check_judge (_ : t) (req : Effects.judge_req) : (unit, string) result =
     Error
       (Printf.sprintf "judge request has %d questions (limit %d)"
          (List.length req.questions) max_judge_questions)
+  else if Redact.contains_secret (Yojson.Safe.to_string (Effects.judge_req_json req)) then
+    Error "judge request contains a credential-shaped string"
   else if state_bytes > max_judge_state_bytes then
     Error
       (Printf.sprintf "judge state is %d bytes (limit %d)" state_bytes

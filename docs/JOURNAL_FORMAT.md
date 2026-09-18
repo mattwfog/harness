@@ -46,6 +46,13 @@ before resuming the program. `ref_seq` points to the request.
 {"seq":9,"ts":"2026-09-01T12:00:01.102Z","phase":"result","kind":"tool_exec","data":{"exit_code":0,"output":"","output_truncated":false,"log_path":"/work/harness/.harness/logs/002.test.log","duration_ms":1088},"ref_seq":8}
 ```
 
+### `failed`
+
+An effect the world could not carry out — a `git add` that matched nothing, a
+judge transport error. `data` is `{"reason":"..."}` and `ref_seq` names the
+request. It is distinct from `denied`: policy had no objection; reality did.
+Replay re-raises the recorded failure.
+
 ### `denied`
 
 Capture writes a denial when the forwarded effect raises `Policy_denied`, or

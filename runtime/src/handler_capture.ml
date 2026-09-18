@@ -22,7 +22,7 @@ let run (j : Journal.t) (fn : unit -> 'a) : 'a =
         Journal.denied j ~kind ~ref_seq:seq ~reason;
         discontinue k e
     | exception e ->
-        Journal.denied j ~kind ~ref_seq:seq ~reason:(Printexc.to_string e);
+        Journal.failed j ~kind ~ref_seq:seq ~reason:(Printexc.to_string e);
         discontinue k e
   in
   match_with fn ()
