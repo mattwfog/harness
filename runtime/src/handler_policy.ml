@@ -43,6 +43,13 @@ let run (policy : Policy.t) (fn : unit -> 'a) : 'a =
                   | Ok () -> forward k (Effects.Git_commit req)
                   | Error reason ->
                       discontinue k (deny ~effect_kind:"git_commit" ~reason))
+          | Effects.Judge req ->
+              Some
+                (fun (k : (b, _) continuation) ->
+                  match Policy.check_judge policy req with
+                  | Ok () -> forward k (Effects.Judge req)
+                  | Error reason ->
+                      discontinue k (deny ~effect_kind:"judge" ~reason))
           | Effects.File_read path ->
               (* Reads are allowed everywhere; they pass through so the
                  capture handler has already journaled them. *)

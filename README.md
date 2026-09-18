@@ -46,9 +46,22 @@ agent task program
   tripwire regression. Harmful lessons are retired, with the scorecard kept.
   [`lessons/`](lessons/) holds a real one: a provider-quota failure the
   harness learned from its own run.
+- **Model judgments are effects too.** Lesson recall is substring matching by
+  default. With `--recall-judge jev` the substring hits are narrowed by one
+  relevance judgment per lesson from [TypeSafe](https://typesafe.ai)'s Jev
+  model, which returns a probability per yes/no question rather than text. The
+  call is a `Judge` effect: journaled with its full question text, bounded by
+  policy (allowlisted model, capped payload), and **answered from the journal
+  on replay** — a test asserts replay never reaches the judge, and that a
+  replay which skips the judgment diverges. If the judge is denied or fails,
+  recall falls back to the substring selection. The judgment only narrows what
+  is injected; promoting or retiring a lesson stays the measured scorecard.
+  The key is read from `TYPESAFE_API_KEY` or `~/.config/typesafe/api_key` and is
+  never journaled; `HARNESS_JUDGE_CMD` swaps the network for a shell command, so
+  tests and offline runs need no key.
 
 ```sh
-harness run     --repo DIR [--runner kimi|codex|cmd:<shell>] tasks/001-readme.md
+harness run     --repo DIR [--runner kimi|codex|cmd:<shell>] [--recall-judge jev[:0.5]] tasks/001-readme.md
 harness status  --repo DIR RUN_ID
 harness journal --repo DIR RUN_ID
 harness replay  --repo DIR --runner codex RUN_ID tasks/001-readme.md
@@ -97,7 +110,7 @@ OCaml 5.3 with dune; Python ≥ 3.12, standard library only.
 ```sh
 opam switch create harness 5.3.0 && eval "$(opam env --switch=harness)"
 opam install . --deps-only --with-test
-dune build && dune test          # runtime: 16 tests · verdict: 18 tests incl. Python parity
+dune build && dune test          # runtime: 19 tests · verdict: 18 tests incl. Python parity
 cd python && python3 -m pytest -q   # 78 tests
 ```
 
@@ -109,7 +122,7 @@ done. [`tasks/`](tasks/) holds the two task specs the harness ran on itself
 (its first README and the journal-format doc).
 
 Working today: the runtime (effects, journal, replay, revert, fleet program,
-distill, promotion gate) and the verdict layer (Python end to end; OCaml
+distill, promotion gate, judged recall) and the verdict layer (Python end to end; OCaml
 validate / matrix / detect / report / gate with parity tests).
 
 Next: the two layers are not yet joined. The promotion gate still scores with

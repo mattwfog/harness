@@ -16,6 +16,7 @@ type config = {
   timeout_s : int;
   dry_run : bool;
   lesson_mode : Recall.mode;
+  recall_judge : Recall.judge; (* how substring hits are narrowed *)
   lessons_root : string; (* repo whose lessons/ dir recall reads; usually repo_root, but the gate's eval repos borrow the main corpus *)
 }
 
@@ -77,9 +78,10 @@ let run_task (cfg : config) (state : Run_state.t) (task : Task_spec.t) : string
   let lessons =
     List.map
       (fun (l : Lesson.t) -> l.guidance)
-      (Recall.for_task ~repo_root:cfg.lessons_root ~task
+      (Recall.for_task ~judge:cfg.recall_judge ~repo_root:cfg.lessons_root
+         ~task
          ~runner:(Runners.to_string cfg.runner)
-         ~mode:cfg.lesson_mode)
+         ~mode:cfg.lesson_mode ())
   in
   let rec attempt failure_context =
     if Run_state.attempts_of state task.id >= max_attempts then (

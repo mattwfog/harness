@@ -179,6 +179,7 @@ Write the file hello.txt containing the word: world
       timeout_s = 60;
       dry_run = false;
       lesson_mode = Recall.Normal;
+      recall_judge = Recall.Substring;
       lessons_root = repo;
     }
   in
@@ -246,6 +247,7 @@ Mission text.
       timeout_s = 60;
       dry_run = false;
       lesson_mode = Recall.Normal;
+      recall_judge = Recall.Substring;
       lessons_root = repo;
     }
   in
@@ -288,6 +290,7 @@ Write hello.txt containing: world
       timeout_s = 60;
       dry_run = false;
       lesson_mode = Recall.Normal;
+      recall_judge = Recall.Substring;
       lessons_root = repo;
     }
   in
@@ -334,6 +337,7 @@ Write hello.txt containing: world
       timeout_s = 60;
       dry_run = false;
       lesson_mode = Recall.Normal;
+      recall_judge = Recall.Substring;
       lessons_root = repo;
     }
   in
@@ -471,6 +475,7 @@ let test_learning_loop () =
       timeout_s = 60;
       dry_run = false;
       lesson_mode;
+      recall_judge = Recall.Substring;
       lessons_root = repo;
     }
   in
@@ -588,6 +593,7 @@ Write hello.txt: world
           timeout_s = 60;
           dry_run = false;
           lesson_mode = Recall.Normal;
+      recall_judge = Recall.Substring;
           lessons_root = repo;
         }
       ~lesson_id:"evil-advice" ~eval_paths:[ eval_path ] ~k:1
@@ -606,6 +612,141 @@ Write hello.txt: world
   in
   Alcotest.(check bool) "scorecard says retired-harmful" true
     (Recall.contains ~needle:{|"verdict": "retired-harmful"|} scorecard)
+
+(* -- judged recall (the Judge effect) ------------------------------------ *)
+
+let write_lesson ~repo ~id ~matcher ~guidance =
+  let dir = Filename.concat repo "lessons" in
+  if not (Sys.file_exists dir) then Unix.mkdir dir 0o755;
+  Out_channel.with_open_bin
+    (Filename.concat dir (id ^ ".md"))
+    (fun oc ->
+      output_string oc
+        (Printf.sprintf
+           "+++\nid = %S\nstatus = \"promoted\"\nmatchers = [%S]\norigin_run = \
+            \"t\"\ncreated = \"2026-01-01\"\n+++\n\n%s\n"
+           id matcher guidance))
+
+(* Two promoted lessons share the matcher "kimi"; only one is about the task.
+   The stub judge answers from a fixed table and drops a marker file each time
+   it is called, so tests can tell whether the judge was really invoked. *)
+let judged_repo () =
+  let repo = temp_dir "harness-judge-repo" in
+  run_cmd_in repo
+    "git init -q -b main && git config user.email harness@test && git config \
+     user.name harness && git commit -q --allow-empty -m root";
+  write_lesson ~repo ~id:"kimi-quota" ~matcher:"kimi"
+    ~guidance:"QUOTA-GUIDANCE: the kimi runner has a weekly usage limit.";
+  write_lesson ~repo ~id:"kimi-docs" ~matcher:"kimi"
+    ~guidance:"DOCS-GUIDANCE: kimi documentation lives under docs/kimi.";
+  let task =
+    write_task ~dir:repo ~file:"j1.md" ~id:"J1" ~owns:"prompt.txt"
+      ~acceptance:"test -s prompt.txt"
+      ~body:"Run the nightly batch through the kimi runner."
+  in
+  (repo, task)
+
+let judged_cfg repo judge =
+  {
+    Fleet.repo_root = repo;
+    work_dir = Filename.concat repo ".harness";
+    runner = Runners.Cmd {|printf '%s' "$HARNESS_PROMPT" > prompt.txt|};
+    checks = [];
+    timeout_s = 60;
+    dry_run = false;
+    lesson_mode = Recall.Normal;
+    recall_judge = judge;
+    lessons_root = repo;
+  }
+
+let stub_judge ~marker =
+  Printf.sprintf
+    {|cat > /dev/null; touch %s; echo '{"model":"stub","answers":{"kimi-quota":{"type":"noul","noul":0.91},"kimi-docs":{"type":"noul","noul":0.07}},"usage":{"input_tokens":10,"output_tokens":2}}'|}
+    (Filename.quote marker)
+
+let with_judge_cmd cmd fn =
+  Unix.putenv "HARNESS_JUDGE_CMD" cmd;
+  Fun.protect ~finally:(fun () -> Unix.putenv "HARNESS_JUDGE_CMD" "") fn
+
+let read_all path = In_channel.with_open_bin path In_channel.input_all
+
+let test_judged_recall_narrows_and_replays () =
+  let repo, task = judged_repo () in
+  let marker = Filename.concat repo "judge-called" in
+  let cfg = judged_cfg repo Recall.default_jev in
+  let exit_code =
+    with_judge_cmd (stub_judge ~marker) (fun () ->
+        Fleet.run cfg ~resume:None ~run_id:(Some "j") ~task_paths:[ task ])
+  in
+  Alcotest.(check int) "run exits 0" 0 exit_code;
+  Alcotest.(check bool) "judge was called" true (Sys.file_exists marker);
+  let prompt = read_all (Filename.concat repo "prompt.txt") in
+  Alcotest.(check bool) "relevant lesson injected" true
+    (Recall.contains ~needle:"QUOTA-GUIDANCE" prompt);
+  Alcotest.(check bool) "keyword-only lesson filtered out" false
+    (Recall.contains ~needle:"DOCS-GUIDANCE" prompt);
+  let journal = read_all (Filename.concat cfg.work_dir "journal/j.jsonl") in
+  Alcotest.(check bool) "judge request journaled" true
+    (Recall.contains ~needle:{|"kind":"judge"|} journal);
+  Alcotest.(check bool) "probabilities journaled" true
+    (Recall.contains ~needle:{|"recall_judged"|} journal);
+  (* Replay with a judge that would FAIL and leave a marker if called: the
+     recorded answer must come from the journal, never from the world. *)
+  Sys.remove marker;
+  let replay_exit =
+    with_judge_cmd
+      (Printf.sprintf "touch %s; exit 1" (Filename.quote marker))
+      (fun () -> Fleet.run_replay cfg ~run_id:"j" ~task_paths:[ task ])
+  in
+  Alcotest.(check int) "replay exits 0" 0 replay_exit;
+  Alcotest.(check bool) "replay never called the judge" false
+    (Sys.file_exists marker);
+  (* Severed: a replay that does not perform the Judge effect diverges, which
+     proves the recorded judgment is load-bearing in the trajectory. *)
+  let severed_exit =
+    Fleet.run_replay (judged_cfg repo Recall.Substring) ~run_id:"j"
+      ~task_paths:[ task ]
+  in
+  Alcotest.(check bool) "replay without the judge diverges" true
+    (severed_exit <> 0)
+
+let test_judged_recall_falls_back_when_judge_fails () =
+  let repo, task = judged_repo () in
+  let cfg = judged_cfg repo Recall.default_jev in
+  let exit_code =
+    with_judge_cmd "cat > /dev/null; exit 3" (fun () ->
+        Fleet.run cfg ~resume:None ~run_id:(Some "jf") ~task_paths:[ task ])
+  in
+  Alcotest.(check int) "run still exits 0" 0 exit_code;
+  let prompt = read_all (Filename.concat repo "prompt.txt") in
+  Alcotest.(check bool) "substring selection kept (quota)" true
+    (Recall.contains ~needle:"QUOTA-GUIDANCE" prompt);
+  Alcotest.(check bool) "substring selection kept (docs)" true
+    (Recall.contains ~needle:"DOCS-GUIDANCE" prompt);
+  let journal = read_all (Filename.concat cfg.work_dir "journal/jf.jsonl") in
+  Alcotest.(check bool) "fallback journaled" true
+    (Recall.contains ~needle:{|"recall_judge_unavailable"|} journal);
+  let replay_exit =
+    with_judge_cmd "exit 0" (fun () ->
+        Fleet.run_replay cfg ~run_id:"jf" ~task_paths:[ task ])
+  in
+  Alcotest.(check int) "the failed judgment replays too" 0 replay_exit
+
+let test_policy_bounds_judge_egress () =
+  let policy = mk_policy "/tmp" in
+  let q = { Effects.qid = "a"; instructions = "?"; yes = "y"; no = "n" } in
+  let req model state questions = { Effects.model; state; questions } in
+  Alcotest.(check bool) "allowlisted model passes" true
+    (Policy.check_judge policy (req "jev-latest" (`String "s") [ q ]) = Ok ());
+  Alcotest.(check bool) "other model denied" true
+    (Result.is_error
+       (Policy.check_judge policy (req "some-llm" (`String "s") [ q ])));
+  Alcotest.(check bool) "oversized state denied" true
+    (Result.is_error
+       (Policy.check_judge policy
+          (req "jev-latest" (`String (String.make 70_000 'x')) [ q ])));
+  Alcotest.(check bool) "no questions denied" true
+    (Result.is_error (Policy.check_judge policy (req "jev-latest" `Null [])))
 
 let () =
   Random.self_init ();
@@ -656,5 +797,14 @@ let () =
             test_learning_loop;
           Alcotest.test_case "gate retires harmful lesson" `Quick
             test_gate_retires_harmful_lesson;
+        ] );
+      ( "judged recall",
+        [
+          Alcotest.test_case "narrows, journals, replays without the judge"
+            `Quick test_judged_recall_narrows_and_replays;
+          Alcotest.test_case "falls back when the judge fails" `Quick
+            test_judged_recall_falls_back_when_judge_fails;
+          Alcotest.test_case "policy bounds judge egress" `Quick
+            test_policy_bounds_judge_egress;
         ] );
     ]

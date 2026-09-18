@@ -100,3 +100,25 @@ let check_git_commit (t : t) (req : Effects.commit_req) : (unit, string) result
         Error
           (Printf.sprintf "commit paths outside owned scope: %s"
              (String.concat ", " bad))
+
+(* Judge egress: a judgment request leaves the machine, so it is bounded.
+   Only allowlisted models, a bounded number of questions, and a bounded
+   payload — the state is task text and lesson guidance, never file dumps. *)
+let allowed_judge_models = [ "jev-latest" ]
+let max_judge_questions = 64
+let max_judge_state_bytes = 65_536
+
+let check_judge (_ : t) (req : Effects.judge_req) : (unit, string) result =
+  let state_bytes = String.length (Yojson.Safe.to_string req.state) in
+  if not (List.mem req.model allowed_judge_models) then
+    Error (Printf.sprintf "judge model %s is not allowlisted" req.model)
+  else if req.questions = [] then Error "judge request has no questions"
+  else if List.length req.questions > max_judge_questions then
+    Error
+      (Printf.sprintf "judge request has %d questions (limit %d)"
+         (List.length req.questions) max_judge_questions)
+  else if state_bytes > max_judge_state_bytes then
+    Error
+      (Printf.sprintf "judge state is %d bytes (limit %d)" state_bytes
+         max_judge_state_bytes)
+  else Ok ()

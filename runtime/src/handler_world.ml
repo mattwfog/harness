@@ -118,6 +118,140 @@ let git_commit (cfg : config) (req : Effects.commit_req) : Effects.commit_result
   let sha = run [ "git"; "rev-parse"; "HEAD" ] "git-rev-parse" in
   { Effects.sha = String.trim sha.output }
 
+(* Run argv with [stdin_text] on stdin; return (exit code, stdout). Used for
+   the judge transport, which must not put a credential in argv (visible in
+   the process table) or in a log file. *)
+let run_with_stdin ~(argv : string list) ~(stdin_text : string) : int * string =
+  let in_r, in_w = Unix.pipe ~cloexec:true () in
+  let out_r, out_w = Unix.pipe ~cloexec:true () in
+  let pid =
+    Unix.create_process (List.hd argv) (Array.of_list argv) in_r out_w
+      Unix.stderr
+  in
+  Unix.close in_r;
+  Unix.close out_w;
+  let oc = Unix.out_channel_of_descr in_w in
+  (try output_string oc stdin_text with Sys_error _ -> ());
+  (try close_out oc with Sys_error _ -> ());
+  let ic = Unix.in_channel_of_descr out_r in
+  let out = In_channel.input_all ic in
+  close_in ic;
+  let code =
+    match snd (Unix.waitpid [] pid) with
+    | Unix.WEXITED c -> c
+    | Unix.WSIGNALED _ | Unix.WSTOPPED _ -> 255
+  in
+  (code, out)
+
+let judge_endpoint = "https://api.typesafe.ai/v1/systemone"
+
+let judge_api_key () =
+  match Sys.getenv_opt "TYPESAFE_API_KEY" with
+  | Some k when String.trim k <> "" -> Some (String.trim k)
+  | _ -> (
+      match Sys.getenv_opt "HOME" with
+      | None -> None
+      | Some home ->
+          let path = Filename.concat home ".config/typesafe/api_key" in
+          if Sys.file_exists path then Some (String.trim (read_file path))
+          else None)
+
+let judge_body (req : Effects.judge_req) : Yojson.Safe.t =
+  `Assoc
+    [
+      ("model", `String req.model);
+      ("state", req.state);
+      ( "questions",
+        `Assoc
+          (List.map
+             (fun (q : Effects.noul_question) ->
+               ( q.qid,
+                 `Assoc
+                   [
+                     ("type", `String "noul");
+                     ("instructions", `String q.instructions);
+                     ( "criteria",
+                       `Assoc [ ("true", `String q.yes); ("false", `String q.no) ]
+                     );
+                   ] ))
+             req.questions) );
+    ]
+
+let judge_result_of_response (req : Effects.judge_req) (text : string) :
+    Effects.judge_result =
+  let open Yojson.Safe.Util in
+  let json =
+    try Yojson.Safe.from_string text
+    with _ -> failwith "judge: response was not JSON"
+  in
+  let answers = member "answers" json in
+  let probability (q : Effects.noul_question) =
+    match member "noul" (member q.qid answers) with
+    | `Float f -> (q.qid, f)
+    | `Int i -> (q.qid, float_of_int i)
+    | _ -> failwith (Printf.sprintf "judge: no noul answer for %s" q.qid)
+  in
+  let int_at path =
+    match List.fold_left (fun j k -> member k j) json path with
+    | `Int i -> i
+    | _ -> 0
+  in
+  {
+    Effects.probabilities = List.map probability req.questions;
+    model_used = (match member "model" json with `String s -> s | _ -> req.model);
+    input_tokens = int_at [ "usage"; "input_tokens" ];
+    output_tokens = int_at [ "usage"; "output_tokens" ];
+  }
+
+(* The judge transport. HARNESS_JUDGE_CMD, when set, replaces the network:
+   the request body goes to that shell command's stdin and its stdout is the
+   response — the same scriptable seam the cmd: runner gives agents, so tests
+   and offline runs never need a key. Otherwise: curl, with the bearer token
+   passed in a config read from stdin. *)
+let judge (req : Effects.judge_req) : Effects.judge_result =
+  let body = Yojson.Safe.to_string (judge_body req) in
+  match Sys.getenv_opt "HARNESS_JUDGE_CMD" with
+  | Some cmd when String.trim cmd <> "" ->
+      let code, out = run_with_stdin ~argv:[ "sh"; "-c"; cmd ] ~stdin_text:body in
+      if code <> 0 then failwith (Printf.sprintf "judge command exited %d" code)
+      else judge_result_of_response req out
+  | _ -> (
+      match judge_api_key () with
+      | None ->
+          failwith
+            "judge: no TypeSafe API key (set TYPESAFE_API_KEY or              ~/.config/typesafe/api_key)"
+      | Some key ->
+          let body_path = Filename.temp_file "harness-judge-" ".json" in
+          Fun.protect
+            ~finally:(fun () -> try Sys.remove body_path with Sys_error _ -> ())
+            (fun () ->
+              write_file body_path body;
+              let config =
+                Printf.sprintf "header = \"Authorization: Bearer %s\"\n" key
+              in
+              let code, out =
+                run_with_stdin
+                  ~argv:
+                    [
+                      "curl"; "-sS"; "--max-time"; "30"; "-K"; "-"; "-X"; "POST";
+                      judge_endpoint; "-H"; "Content-Type: application/json";
+                      "--data-binary"; "@" ^ body_path; "-w"; "\n%{http_code}";
+                    ]
+                  ~stdin_text:config
+              in
+              if code <> 0 then failwith (Printf.sprintf "judge: curl exited %d" code);
+              let out = String.trim out in
+              let status, payload =
+                match String.rindex_opt out '\n' with
+                | Some i ->
+                    ( String.sub out (i + 1) (String.length out - i - 1),
+                      String.sub out 0 i )
+                | None -> (out, "")
+              in
+              if status <> "200" then
+                failwith (Printf.sprintf "judge: HTTP %s" status)
+              else judge_result_of_response req payload))
+
 let run (cfg : config) (fn : unit -> 'a) : 'a =
   match_with fn ()
     {
@@ -151,6 +285,12 @@ let run (cfg : config) (fn : unit -> 'a) : 'a =
               Some
                 (fun (k : (b, _) continuation) ->
                   match git_commit cfg req with
+                  | res -> continue k res
+                  | exception e -> discontinue k e)
+          | Effects.Judge req ->
+              Some
+                (fun (k : (b, _) continuation) ->
+                  match judge req with
                   | res -> continue k res
                   | exception e -> discontinue k e)
           | Effects.Note _ ->

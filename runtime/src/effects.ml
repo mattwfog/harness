@@ -28,12 +28,38 @@ type commit_req = {
 
 type commit_result = { sha : string }
 
+(* A model JUDGMENT, as an effect. The program asks yes/no questions about a
+   JSON state and receives one probability per question — never generated
+   text. Because it is an effect it is journaled, policy-checked and answered
+   from the journal on replay like every other contact with the world: a
+   probabilistic service never makes a recorded run non-reproducible. *)
+type noul_question = {
+  qid : string; (* the caller's key for this answer; not shown to the model *)
+  instructions : string;
+  yes : string; (* what a "yes" means *)
+  no : string; (* what a "no" means *)
+}
+
+type judge_req = {
+  model : string;
+  state : Yojson.Safe.t;
+  questions : noul_question list;
+}
+
+type judge_result = {
+  probabilities : (string * float) list; (* qid -> P(yes), in question order *)
+  model_used : string;
+  input_tokens : int;
+  output_tokens : int;
+}
+
 type _ Effect.t +=
   | Tool_exec : exec_req -> exec_result Effect.t
   | File_read : string -> string Effect.t
   | File_exists : string -> bool Effect.t
   | File_write : write_req -> unit Effect.t
   | Git_commit : commit_req -> commit_result Effect.t
+  | Judge : judge_req -> judge_result Effect.t
   | Note : (string * Yojson.Safe.t) -> unit Effect.t
 
 exception Policy_denied of { effect_kind : string; reason : string }
@@ -81,3 +107,50 @@ let exec_result_json ~(cap : int) (r : exec_result) : Yojson.Safe.t =
       ("log_path", `String r.log_path);
       ("duration_ms", `Int r.duration_ms);
     ]
+
+let judge_req_json (r : judge_req) : Yojson.Safe.t =
+  `Assoc
+    [
+      ("model", `String r.model);
+      ("state", r.state);
+      ( "questions",
+        `List
+          (List.map
+             (fun q ->
+               `Assoc
+                 [
+                   ("qid", `String q.qid);
+                   ("instructions", `String q.instructions);
+                   ("yes", `String q.yes);
+                   ("no", `String q.no);
+                 ])
+             r.questions) );
+    ]
+
+let judge_result_json (r : judge_result) : Yojson.Safe.t =
+  `Assoc
+    [
+      ( "probabilities",
+        `Assoc (List.map (fun (qid, p) -> (qid, `Float p)) r.probabilities) );
+      ("model_used", `String r.model_used);
+      ("input_tokens", `Int r.input_tokens);
+      ("output_tokens", `Int r.output_tokens);
+    ]
+
+let judge_result_of_json (d : Yojson.Safe.t) : judge_result =
+  let open Yojson.Safe.Util in
+  let number = function
+    | `Float f -> f
+    | `Int i -> float_of_int i
+    | _ -> 0.0
+  in
+  let int_of = function `Int i -> i | _ -> 0 in
+  {
+    probabilities =
+      (match member "probabilities" d with
+      | `Assoc kv -> List.map (fun (qid, p) -> (qid, number p)) kv
+      | _ -> []);
+    model_used = (match member "model_used" d with `String s -> s | _ -> "");
+    input_tokens = int_of (member "input_tokens" d);
+    output_tokens = int_of (member "output_tokens" d);
+  }

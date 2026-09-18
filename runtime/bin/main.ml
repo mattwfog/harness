@@ -39,6 +39,20 @@ let run_id_arg =
 let dry_run_arg =
   Arg.(value & flag & info [ "dry-run" ] ~doc:"Print plan and first prompt; spend nothing.")
 
+let recall_judge_arg =
+  let parse s =
+    match Recall.judge_of_string s with Ok j -> Ok j | Error e -> Error (`Msg e)
+  in
+  let print ppf j = Format.pp_print_string ppf (Recall.judge_to_string j) in
+  Arg.(
+    value
+    & opt (conv (parse, print)) Recall.Substring
+    & info [ "recall-judge" ] ~docv:"JUDGE"
+        ~doc:
+          "How substring-matched lessons are narrowed before injection: \
+           $(b,substring) (default) or $(b,jev[:THRESHOLD]) for a journaled \
+           relevance judgment per lesson. Replay needs the same value.")
+
 let tasks_arg =
   Arg.(non_empty & pos_all file [] & info [] ~docv:"TASK.md" ~doc:"Task spec files.")
 
@@ -47,7 +61,8 @@ let work_dir_of repo = function
   | None -> Filename.concat repo ".harness"
 
 let run_cmd =
-  let action repo work_dir runner checks timeout resume run_id dry_run tasks =
+  let action repo work_dir runner checks timeout resume run_id dry_run
+      recall_judge tasks =
     match Runners.of_string runner with
     | Error e ->
         prerr_endline e;
@@ -62,6 +77,7 @@ let run_cmd =
             timeout_s = timeout;
             dry_run;
             lesson_mode = Recall.Normal;
+            recall_judge;
             lessons_root = repo;
           }
           ~resume ~run_id ~task_paths:tasks
@@ -69,10 +85,11 @@ let run_cmd =
   Cmd.v (Cmd.info "run" ~doc:"Dispatch task specs to agents.")
     Term.(
       const action $ repo_arg $ work_dir_arg $ runner_arg $ checks_arg
-      $ timeout_arg $ resume_arg $ run_id_arg $ dry_run_arg $ tasks_arg)
+      $ timeout_arg $ resume_arg $ run_id_arg $ dry_run_arg $ recall_judge_arg
+      $ tasks_arg)
 
 let replay_cmd =
-  let action repo work_dir runner checks timeout run_id tasks =
+  let action repo work_dir runner checks timeout recall_judge run_id tasks =
     match Runners.of_string runner with
     | Error e ->
         prerr_endline e;
@@ -87,6 +104,7 @@ let replay_cmd =
             timeout_s = timeout;
             dry_run = false;
             lesson_mode = Recall.Normal;
+            recall_judge;
             lessons_root = repo;
           }
           ~run_id ~task_paths:tasks
@@ -104,7 +122,7 @@ let replay_cmd =
           disconnected; report OK or the exact divergence.")
     Term.(
       const action $ repo_arg $ work_dir_arg $ runner_arg $ checks_arg
-      $ timeout_arg $ run_id_pos $ tasks_pos)
+      $ timeout_arg $ recall_judge_arg $ run_id_pos $ tasks_pos)
 
 let status_cmd =
   let action repo work_dir run_id =
@@ -225,6 +243,7 @@ let gate_cmd =
               timeout_s = timeout;
               dry_run = false;
               lesson_mode = Recall.Normal;
+            recall_judge = Recall.Substring;
               lessons_root = repo;
             }
           ~lesson_id ~eval_paths:evals ~k

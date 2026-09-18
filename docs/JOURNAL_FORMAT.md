@@ -70,7 +70,8 @@ result entries and do not have `ref_seq`.
 
 ## Request/result pairing
 
-For `tool_exec`, `file_read`, `file_exists`, `file_write`, and `git_commit`, a
+For `tool_exec`, `file_read`, `file_exists`, `file_write`, `git_commit`, and
+`judge`, a
 request is followed by exactly one outcome: either `result` or `denied`. The
 capture handler passes the request's returned `seq` to the outcome writer as
 `ref_seq`. A denied effect has no result entry.
@@ -144,6 +145,19 @@ object `{}`.
 Request `data` contains `repo` (string), `message` (string), and `paths`
 (array of strings). Successful result `data` is `{"sha":"..."}`.
 
+### `judge`
+
+A model judgment: yes/no questions about a JSON state, answered with one
+probability per question and no generated text. Request `data` contains
+`model` (string), `state` (any JSON value), and `questions` (array of objects
+with `qid`, `instructions`, `yes`, `no`). The full question text is part of the
+request so that a reworded question diverges on replay. Successful result
+`data` contains `probabilities` (object: `qid` to a number in 0..1),
+`model_used` (string), `input_tokens` and `output_tokens` (integers). The API
+credential never appears in a request, a result, or a log. Replay answers a
+`judge` request from this recorded result, so a probabilistic service does not
+make a recorded run non-reproducible.
+
 ### Notes
 
 Notes have phase `note`, use their arbitrary label as `kind`, and preserve the
@@ -151,9 +165,10 @@ caller-provided JSON value as `data`. They therefore have no fixed data schema.
 
 ### Denials for any paired kind
 
-A denied `tool_exec`, `file_read`, `file_exists`, `file_write`, or `git_commit`
-uses `{"reason":"..."}` as `data`. Policy currently checks `tool_exec`,
-`file_write`, and `git_commit`; reads and existence checks pass through policy,
+A denied `tool_exec`, `file_read`, `file_exists`, `file_write`, `git_commit`, or
+`judge` uses `{"reason":"..."}` as `data`. Policy currently checks `tool_exec`,
+`file_write`, `git_commit`, and `judge` (allowlisted model, bounded question
+count and state size); reads and existence checks pass through policy,
 although an exception from any forwarded paired effect is still recorded with
 phase `denied`.
 

@@ -186,6 +186,12 @@ let run (c : cursor) (fn : unit -> 'a) : 'a =
                     ~req_json:(Effects.git_commit_req_json req)
                     ~decode:(fun d -> { Effects.sha = str "sha" d })
                     k)
+          | Effects.Judge req ->
+              Some
+                (fun (k : (b, _) continuation) ->
+                  answer c ~kind:"judge"
+                    ~req_json:(Effects.judge_req_json req)
+                    ~decode:Effects.judge_result_of_json k)
           | Effects.Note (label, data) ->
               Some
                 (fun (k : (b, _) continuation) ->
