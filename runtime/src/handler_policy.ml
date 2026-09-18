@@ -57,6 +57,8 @@ let run (policy : Policy.t) (fn : unit -> 'a) : 'a =
           | Effects.File_exists path ->
               Some
                 (fun (k : (b, _) continuation) -> forward k (Effects.File_exists path))
+          | Effects.Clock ->
+              Some (fun (k : (b, _) continuation) -> forward k Effects.Clock)
           | Effects.Note n ->
               Some (fun (k : (b, _) continuation) -> forward k (Effects.Note n))
           | _ -> None);

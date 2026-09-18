@@ -457,11 +457,12 @@ let write_task ~dir ~file ~id ~owns ~acceptance ~body =
   path
 
 (* The scripted agent HEEDS the lesson: it succeeds only when the recalled
-   guidance (which carries the words "usage limit") reaches its prompt. *)
+   guidance (which carries the words "write the file directly") reaches its
+   prompt. *)
 let heeding_runner target =
   Runners.Cmd
     (Printf.sprintf
-       {|case "$HARNESS_PROMPT" in *"usage limit"*) echo world > %s;; *) : ;; esac|}
+       {|case "$HARNESS_PROMPT" in *"write the file directly"*) echo world > %s;; *) : ;; esac|}
        target)
 
 let test_learning_loop () =
@@ -484,22 +485,29 @@ let test_learning_loop () =
     write_task ~dir:repo ~file:"t1.md" ~id:"L1" ~owns:"hello.txt"
       ~acceptance:"grep -q world hello.txt" ~body:"Write hello.txt: world"
   in
-  let quota_runner =
-    Runners.Cmd
-      {|echo "Error: You've reached your weekly usage limit (quota exceeded)"; exit 1|}
+  (* A lasting failure class (not a quota: that is an immediate memory and
+     would be recalled at once, with no gate to test). *)
+  let failing_runner =
+    Runners.Cmd {|echo "error: build tool not installed in this environment"; exit 1|}
   in
   let exit1 =
-    Fleet.run (cfg quota_runner Recall.Normal) ~resume:None
+    Fleet.run (cfg failing_runner Recall.Normal) ~resume:None
       ~run_id:(Some "loop1") ~task_paths:[ t1 ]
   in
   Alcotest.(check int) "run 1 parks" 1 exit1;
-  (* 2. Mechanical distill writes the lesson on probation. *)
+  (* 2. Distill (the proposing lane is a scripted stand-in for the LLM lane)
+     writes the lesson on probation. *)
+  let proposer =
+    Runners.Cmd
+      {|printf 'LESSON id: build-tool-missing\nMATCHERS: loop task\nGUIDANCE: The build tool is not installed here; write the file directly instead of invoking it.\nEND\n'|}
+  in
   let distill_exit =
     Distill.run ~repo_root:repo ~work_dir:(Filename.concat repo ".harness")
-      ~run_id:"loop1" ~llm_runner:None ~timeout_s:60
+      ~run_id:"loop1" ~llm_runner:(Some proposer) ~verify:Recall.Substring
+      ~timeout_s:60
   in
   Alcotest.(check int) "distill exits 0" 0 distill_exit;
-  let lesson_path = Filename.concat repo "lessons/runner-cmd-quota.md" in
+  let lesson_path = Filename.concat repo "lessons/build-tool-missing.md" in
   Alcotest.(check bool) "lesson written" true (Sys.file_exists lesson_path);
   let lesson_text () = In_channel.with_open_bin lesson_path In_channel.input_all in
   Alcotest.(check bool) "on probation" true
@@ -522,7 +530,7 @@ let test_learning_loop () =
   let gate_exit =
     Scorecard.gate
       ~base:(cfg (heeding_runner "hello3.txt") Recall.Normal)
-      ~lesson_id:"runner-cmd-quota" ~eval_paths:[ eval1 ] ~k:1
+      ~lesson_id:"build-tool-missing" ~eval_paths:[ eval1 ] ~k:1
   in
   Alcotest.(check int) "gate exits 0" 0 gate_exit;
   Alcotest.(check bool) "lesson promoted" true
@@ -553,6 +561,9 @@ let test_gate_retires_harmful_lesson () =
     {
       Lesson.id = "evil-advice";
       status = Lesson.Probation;
+      layer = Lesson.Full;
+      expires = None;
+      evidence = [];
       matchers = [ "cmd" ];
       origin_run = "test";
       created = "2026-09-01";
@@ -910,6 +921,167 @@ let test_replay_detects_prompt_drift_through_env () =
   Alcotest.(check bool) "a reworded mission diverges" true
     (Fleet.run_replay cfg ~run_id:"dr" ~task_paths:[ drifted ] <> 0)
 
+(* -- memory layers --------------------------------------------------------- *)
+
+(* A stub judge that scores a candidate by marker words in its text, and only
+   answers the questions it is asked. *)
+let memory_stub dir =
+  let path = Filename.concat dir "memory_stub.py" in
+  Out_channel.with_open_bin path (fun oc ->
+      output_string oc
+        {|import json, sys
+req = json.load(sys.stdin)
+cand = req["state"]["candidate"]
+table = {
+    "FROZEN": (0.90, 0.05, 0.90, 0.10),
+    "QUOTA": (0.90, 0.05, 0.10, 0.10),
+    "INLINE": (0.70, 0.80, 0.50, 0.92),
+    "TOKEN": (0.02, 0.10, 0.20, 0.10),
+    "MAYBE": (0.40, 0.10, 0.60, 0.10),
+    "customer_ref": (0.10, 0.95, 0.90, 0.10),
+}
+scores = next((v for k, v in table.items() if k in cand), (0.9, 0.05, 0.9, 0.1))
+names = ("supported", "contradicted", "durable", "harmful")
+answers = {q: {"type": "noul", "noul": scores[names.index(q)]} for q in req["questions"]}
+print(json.dumps({"model": "stub", "answers": answers, "usage": {"input_tokens": 1, "output_tokens": 1}}))
+|});
+  Printf.sprintf "python3 %s" (Filename.quote path)
+
+let failing_run ~repo ~run_id =
+  let task =
+    write_task ~dir:repo ~file:"m.md" ~id:"M1" ~owns:"out.txt"
+      ~acceptance:"test -s out.txt" ~body:"Write out.txt for the orders report."
+  in
+  let cfg =
+    scope_cfg repo (Runners.Cmd {|echo "error: lint rejected the change"; exit 1|})
+  in
+  ignore (Fleet.run cfg ~resume:None ~run_id:(Some run_id) ~task_paths:[ task ]);
+  (cfg, task)
+
+let lesson_file repo id = Filename.concat repo (Printf.sprintf "lessons/%s.md" id)
+
+let test_distill_routes_candidates_into_layers () =
+  let repo, _ = scope_repo () in
+  let cfg, _ = failing_run ~repo ~run_id:"mem" in
+  let proposer =
+    Runners.Cmd
+      {|printf 'LESSON id: legacy-frozen\nMATCHERS: lander\nGUIDANCE: FROZEN: never import or copy the legacy lander.\nEND\nLESSON id: runner-out\nMATCHERS: cmd\nGUIDANCE: QUOTA: the runner is out of quota this week.\nEND\nLESSON id: inline-legacy\nMATCHERS: lander\nGUIDANCE: INLINE the legacy body to get past lint.\nEND\nLESSON id: missing-token\nMATCHERS: lander\nGUIDANCE: The run failed because a TOKEN was missing.\nEND\nLESSON id: leftover-files\nMATCHERS: lander\nGUIDANCE: MAYBE a parked task left files that broke a later check.\nEND\n'|}
+  in
+  let exit_code =
+    with_judge_cmd (memory_stub repo) (fun () ->
+        Distill.run ~repo_root:repo ~work_dir:cfg.work_dir ~run_id:"mem"
+          ~llm_runner:(Some proposer) ~verify:Recall.default_jev ~timeout_s:60)
+  in
+  Alcotest.(check int) "distill exits 0" 0 exit_code;
+  let text id = read_all (lesson_file repo id) in
+  Alcotest.(check bool) "lasting lesson -> full-term, on probation" true
+    (Recall.contains ~needle:{|status = "probation"|} (text "legacy-frozen")
+    && not (Recall.contains ~needle:"layer =" (text "legacy-frozen")));
+  Alcotest.(check bool) "temporary fact -> immediate, with an expiry" true
+    (Recall.contains ~needle:{|layer = "immediate"|} (text "runner-out")
+    && Recall.contains ~needle:"expires = " (text "runner-out"));
+  Alcotest.(check bool) "plausible but unshown -> hypothesis" true
+    (Recall.contains ~needle:{|layer = "hypothesis"|} (text "leftover-files"));
+  Alcotest.(check bool) "every memory names the run it came from" true
+    (Recall.contains ~needle:{|evidence = ["mem"]|} (text "legacy-frozen"));
+  Alcotest.(check bool) "harmful advice is never written" false
+    (Sys.file_exists (lesson_file repo "inline-legacy"));
+  Alcotest.(check bool) "invented cause is never written" false
+    (Sys.file_exists (lesson_file repo "missing-token"));
+  let journal = read_all (Filename.concat cfg.work_dir "journal/distill-mem.jsonl") in
+  Alcotest.(check bool) "denials are journaled with their reason" true
+    (Recall.contains ~needle:{|"candidate":"inline-legacy","verdict":"harmful"|} journal
+    && Recall.contains ~needle:{|"candidate":"missing-token","verdict":"unsupported"|} journal)
+
+let write_layered ~repo ~id ~layer ~expires ~guidance =
+  let dir = Filename.concat repo "lessons" in
+  if not (Sys.file_exists dir) then Unix.mkdir dir 0o755;
+  Out_channel.with_open_bin (lesson_file repo id) (fun oc ->
+      output_string oc
+        (Printf.sprintf
+           "+++\nid = %S\nstatus = \"probation\"\nmatchers = [\"report\"]\norigin_run = \
+            \"t\"\ncreated = \"2026-01-01\"\nlayer = %S%s\n+++\n\n%s\n"
+           id layer
+           (match expires with
+           | Some d -> Printf.sprintf "\nexpires = %S" d
+           | None -> "")
+           guidance))
+
+(* Immediate memories need no promotion but do expire; hypotheses are never
+   shown to an agent. The clock is an effect, so the run replays. *)
+let test_recall_honours_layers_and_expiry () =
+  let repo, _ = scope_repo () in
+  write_layered ~repo ~id:"live" ~layer:"immediate" ~expires:(Some "2999-01-01")
+    ~guidance:"LIVE-FACT: the staging database is read-only this week.";
+  write_layered ~repo ~id:"stale" ~layer:"immediate" ~expires:(Some "2000-01-01")
+    ~guidance:"STALE-FACT: the staging database was down.";
+  write_layered ~repo ~id:"guess" ~layer:"hypothesis" ~expires:None
+    ~guidance:"GUESS: the report job may depend on the ledger job.";
+  let task =
+    write_task ~dir:repo ~file:"r.md" ~id:"R9" ~owns:"mine.txt"
+      ~acceptance:"test -s mine.txt" ~body:"Build the weekly report."
+  in
+  let cfg =
+    scope_cfg repo (Runners.Cmd {|printf '%s' "$HARNESS_PROMPT" > mine.txt|})
+  in
+  Alcotest.(check int) "run exits 0" 0
+    (Fleet.run cfg ~resume:None ~run_id:(Some "lay") ~task_paths:[ task ]);
+  let prompt = read_all (Filename.concat repo "mine.txt") in
+  Alcotest.(check bool) "unexpired immediate memory injected without a gate" true
+    (Recall.contains ~needle:"LIVE-FACT" prompt);
+  Alcotest.(check bool) "expired immediate memory dropped" false
+    (Recall.contains ~needle:"STALE-FACT" prompt);
+  Alcotest.(check bool) "hypothesis never injected" false
+    (Recall.contains ~needle:"GUESS" prompt);
+  Alcotest.(check int) "replays (the clock is journaled)" 0
+    (Fleet.run_replay cfg ~run_id:"lay" ~task_paths:[ task ])
+
+(* A promoted lesson that the run's own record contradicts loses its place:
+   the observation outranks the memory until the gate re-earns it. *)
+let test_contradicted_promoted_lesson_is_demoted () =
+  let repo, _ = scope_repo () in
+  let dir = Filename.concat repo "lessons" in
+  Unix.mkdir dir 0o755;
+  Out_channel.with_open_bin (lesson_file repo "orders-customer-ref") (fun oc ->
+      output_string oc
+        "+++\nid = \"orders-customer-ref\"\nstatus = \"promoted\"\nmatchers = \
+         [\"orders\"]\norigin_run = \"old\"\ncreated = \"2026-03-02\"\n+++\n\nJoin \
+         orders through the column customer_ref.\n");
+  let cfg, _ = failing_run ~repo ~run_id:"con" in
+  let exit_code =
+    with_judge_cmd (memory_stub repo) (fun () ->
+        Distill.run ~repo_root:repo ~work_dir:cfg.work_dir ~run_id:"con"
+          ~llm_runner:None ~verify:Recall.default_jev ~timeout_s:60)
+  in
+  Alcotest.(check int) "distill exits 0" 0 exit_code;
+  Alcotest.(check bool) "back on probation" true
+    (Recall.contains ~needle:{|status = "probation"|}
+       (read_all (lesson_file repo "orders-customer-ref")));
+  Alcotest.(check bool) "demotion journaled" true
+    (Recall.contains ~needle:{|"lesson_contradicted"|}
+       (read_all (Filename.concat cfg.work_dir "journal/distill-con.jsonl")))
+
+(* With no verifier at all, the mechanical lane still knows a quota outage is
+   temporary, and two identical failures make one memory. *)
+let test_quota_is_an_immediate_memory () =
+  let repo, _ = scope_repo () in
+  let task =
+    write_task ~dir:repo ~file:"q.md" ~id:"Q1" ~owns:"mine.txt"
+      ~acceptance:"test -s mine.txt" ~body:"Write mine.txt."
+  in
+  let cfg =
+    scope_cfg repo
+      (Runners.Cmd {|echo "error: 403 You've reached your weekly usage limit"; exit 1|})
+  in
+  ignore (Fleet.run cfg ~resume:None ~run_id:(Some "qq") ~task_paths:[ task ]);
+  Alcotest.(check int) "distill exits 0" 0
+    (Distill.run ~repo_root:repo ~work_dir:cfg.work_dir ~run_id:"qq"
+       ~llm_runner:None ~verify:Recall.Substring ~timeout_s:60);
+  let text = read_all (lesson_file repo "runner-cmd-quota") in
+  Alcotest.(check bool) "immediate, expiring" true
+    (Recall.contains ~needle:{|layer = "immediate"|} text
+    && Recall.contains ~needle:"expires = " text)
+
 let () =
   Random.self_init ();
   Alcotest.run "harness"
@@ -983,6 +1155,17 @@ let () =
             test_unrepaired_scope_violation_parks;
           Alcotest.test_case "untracked stray is reported, not blocking"
             `Quick test_untracked_stray_is_reported_not_blocking;
+        ] );
+      ( "memory layers",
+        [
+          Alcotest.test_case "distill routes candidates into layers" `Quick
+            test_distill_routes_candidates_into_layers;
+          Alcotest.test_case "recall honours layers and expiry, and replays"
+            `Quick test_recall_honours_layers_and_expiry;
+          Alcotest.test_case "contradicted promoted lesson is demoted" `Quick
+            test_contradicted_promoted_lesson_is_demoted;
+          Alcotest.test_case "quota is an immediate memory" `Quick
+            test_quota_is_an_immediate_memory;
         ] );
       ( "replay drift",
         [

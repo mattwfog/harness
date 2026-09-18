@@ -169,7 +169,7 @@ let journal_cmd =
     Term.(const action $ repo_arg $ work_dir_arg $ run_id_pos)
 
 let distill_cmd =
-  let action repo work_dir runner timeout llm run_id =
+  let action repo work_dir runner timeout llm verify run_id =
     let llm_runner =
       if not llm then None
       else
@@ -180,10 +180,25 @@ let distill_cmd =
             None
     in
     Distill.run ~repo_root:repo ~work_dir:(work_dir_of repo work_dir) ~run_id
-      ~llm_runner ~timeout_s:timeout
+      ~llm_runner ~verify ~timeout_s:timeout
   in
   let llm_flag =
     Arg.(value & flag & info [ "llm" ] ~doc:"Also run the LLM distillation lane via --runner.")
+  in
+  let verify_arg =
+    let parse v =
+      match Recall.judge_of_string v with Ok j -> Ok j | Error e -> Error (`Msg e)
+    in
+    let print ppf j = Format.pp_print_string ppf (Recall.judge_to_string j) in
+    Arg.(
+      value
+      & opt (conv (parse, print)) Recall.Substring
+      & info [ "verify" ] ~docv:"JUDGE"
+          ~doc:
+            "Verify each candidate memory against the run's evidence before \
+             it is written: $(b,jev[:THRESHOLD]) asks whether it is supported, \
+             contradicted, lasting and harmful, then routes it to full-term, \
+             immediate, hypothesis, or denies it. Default: no verification.")
   in
   let run_id_pos =
     Arg.(required & pos 0 (some string) None & info [] ~docv:"RUN_ID")
@@ -191,11 +206,10 @@ let distill_cmd =
   Cmd.v
     (Cmd.info "distill"
        ~doc:
-         "Distill a run's journal into candidate lessons (written on \
-          probation under lessons/).")
+         "Distill a run's journal into candidate memories under lessons/.")
     Term.(
       const action $ repo_arg $ work_dir_arg $ runner_arg $ timeout_arg
-      $ llm_flag $ run_id_pos)
+      $ llm_flag $ verify_arg $ run_id_pos)
 
 let lessons_cmd =
   let action repo =

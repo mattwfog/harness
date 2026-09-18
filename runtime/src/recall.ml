@@ -144,13 +144,27 @@ let for_task ?(judge = Substring) ~repo_root ~(task : Task_spec.t)
              ( "lesson_parse_errors",
                `List (List.map (fun e -> `String e) errors) ));
       let haystack = String.concat "\n" [ task.title; task.body; runner ] in
+      (* Immediate memories expire. The clock is read (as an effect, so a
+         replay sees the recorded time) only when there is one to check. *)
+      let today =
+        if List.exists (fun (l : Lesson.t) -> l.layer = Lesson.Immediate) lessons
+        then Some (Effects.date_of_epoch (Effect.perform Effects.Clock))
+        else None
+      in
+      let live (l : Lesson.t) =
+        match (l.layer, l.expires, today) with
+        | Lesson.Full, _, _ -> l.status = Lesson.Promoted
+        | Lesson.Immediate, Some expires, Some today ->
+            l.status <> Lesson.Retired && expires >= today
+        | Lesson.Immediate, _, _ -> false (* no expiry recorded: never recalled *)
+        | Lesson.Hypothesis, _, _ -> false (* kept for confirmation, never injected *)
+      in
       (* Forced lessons bypass the judge: the gate forces a candidate
          precisely to measure it, so nothing may filter it out. *)
       let hits =
         List.filter
           (fun (l : Lesson.t) ->
-            l.status = Lesson.Promoted && matches l ~haystack
-            && not (List.mem l.id forced))
+            live l && matches l ~haystack && not (List.mem l.id forced))
           lessons
       in
       let kept = narrow ~judge ~task ~runner hits in

@@ -11,7 +11,12 @@
    writes, and any LLM call are journaled, policy-checked effects — the
    learning loop is itself a recorded, replayable trajectory. *)
 
-type candidate = { id : string; matchers : string list; guidance : string }
+type candidate = {
+  id : string;
+  matchers : string list;
+  guidance : string;
+  hint : Lesson.layer; (* what the lane that proposed it already knows *)
+}
 
 let now_date () =
   let tm = Unix.gmtime (Unix.gettimeofday ()) in
@@ -103,6 +108,7 @@ let mechanical_candidates (failures : failure list) : candidate list =
         Some
           {
             id = Printf.sprintf "runner-%s-quota" (slug f.runner);
+            hint = Lesson.Immediate; (* true now, false when the window resets *)
             matchers = [ f.runner ];
             guidance =
               Printf.sprintf
@@ -117,6 +123,7 @@ let mechanical_candidates (failures : failure list) : candidate list =
         Some
           {
             id = Printf.sprintf "timeout-%s" (slug f.task);
+            hint = Lesson.Full;
             matchers = [ f.title ];
             guidance =
               Printf.sprintf
@@ -128,6 +135,7 @@ let mechanical_candidates (failures : failure list) : candidate list =
         Some
           {
             id = Printf.sprintf "policy-%s" (slug f.task);
+            hint = Lesson.Full;
             matchers = [ f.title ];
             guidance =
               Printf.sprintf
@@ -197,19 +205,239 @@ let parse_llm_output (out : string) : candidate list =
                       match current with
                       | Some (id, matchers, guidance)
                         when id <> "" && matchers <> [] && guidance <> "" ->
-                          go ({ id = slug id; matchers; guidance } :: acc) None rest
+                          go ({ id = slug id; matchers; guidance; hint = Lesson.Full } :: acc) None rest
                       | _ -> go acc None rest
                     else go acc current rest)))
   in
   go [] None lines
 
+(* ---- evidence ------------------------------------------------------------ *)
+
+(* What the run's journal recorded, task by task: what the agent said, what
+   each check printed, what the harness decided. This — not a failure's first
+   line — is what a candidate memory is verified against. *)
+let evidence_cap = 24_000
+
+let evidence_digest (entries : Yojson.Safe.t list) : string =
+  let open Yojson.Safe.Util in
+  let str k e = match member k e with `String s -> s | _ -> "" in
+  let strs k e =
+    match member k e with
+    | `List l -> List.filter_map (function `String s -> Some s | _ -> None) l
+    | _ -> []
+  in
+  let buf = Buffer.create 4096 in
+  let line fmt = Printf.ksprintf (fun l -> Buffer.add_string buf (l ^ "\n")) fmt in
+  let pending = ref `Check in
+  List.iter
+    (fun e ->
+      let phase = str "phase" e and kind = str "kind" e and d = member "data" e in
+      match (phase, kind) with
+      | "note", "task_config" ->
+          line "## task %s: %s (owns %s)" (str "task" d) (str "title" d)
+            (String.concat ", " (strs "owns" d))
+      | "note", "recall" when strs "lessons" d <> [] ->
+          line "[harness] lessons injected into the prompt: %s"
+            (String.concat ", " (strs "lessons" d))
+      | "note", "attempt_start" ->
+          line "[harness] attempt %d"
+            (match member "attempt" d with `Int n -> n | _ -> 0)
+      | "request", "tool_exec" ->
+          let argv = strs "argv" d in
+          let is_snapshot =
+            List.exists (fun a -> contains ~needle:"git ls-files -m -d" a) argv
+          in
+          let is_agent =
+            member "env_extra" d <> `List []
+            || (match argv with
+               | prog :: _ ->
+                   Filename.basename prog = "kimi" || Filename.basename prog = "codex"
+               | [] -> false)
+          in
+          pending :=
+            if is_snapshot then `Snapshot
+            else if is_agent then `Agent
+            else
+              `Command
+                (match List.rev argv with last :: _ -> last | [] -> "")
+      | "result", "tool_exec" -> (
+          let code = match member "exit_code" d with `Int c -> c | _ -> 0 in
+          let output =
+            let o = String.trim (str "output" d) in
+            if String.length o > 900 then String.sub o 0 900 else o
+          in
+          match !pending with
+          | `Snapshot -> ()
+          | `Agent -> line "[agent] exit %d\n%s" code output
+          | `Command cmd -> line "[check] exit %d | %s\n%s" code cmd output
+          | `Check -> line "[check] exit %d\n%s" code output)
+      | "note", "scope_violation" ->
+          line "[harness] attempt rejected: files changed outside the owned paths: %s"
+            (String.concat ", " (strs "paths" d))
+      | "note", "task_parked" -> line "[harness] task %s PARKED" (str "task" d)
+      | "result", "git_commit" -> line "[harness] committed"
+      | _ -> ())
+    entries;
+  let text = Buffer.contents buf in
+  if String.length text > evidence_cap then String.sub text 0 evidence_cap else text
+
+(* ---- verification ------------------------------------------------------- *)
+
+(* Four independent judgments decide whether a candidate becomes memory, and
+   which kind. A proposer (mechanical or LLM) can be wrong in four different
+   ways: it can invent, it can misread, it can mistake a moment for a rule,
+   and it can recommend the very shortcut that caused the failure. *)
+type verdict =
+  | Deny of string (* harmful | contradicted | unsupported *)
+  | Keep of Lesson.layer
+
+let questions : Effects.noul_question list =
+  [
+    {
+      Effects.qid = "supported";
+      instructions =
+        "Read the run record in `evidence`. Is the statement in `candidate` \
+         directly supported by what that record shows happened, rather than \
+         adding causes, facts or names the record does not contain?";
+      yes = "The record shows it: the relevant output, check result or harness note is there.";
+      no = "The record does not show it, or the statement adds something the record does not contain.";
+    };
+    {
+      qid = "contradicted";
+      instructions =
+        "Read the run record in `evidence`. Does the record contradict the \
+         statement in `candidate`?";
+      yes = "Something in the record shows the statement is false.";
+      no = "Nothing in the record conflicts with the statement.";
+    };
+    {
+      qid = "durable";
+      instructions =
+        "Is the statement in `candidate` a lasting property of the codebase, \
+         its tools or how work must be done here - something that stays true \
+         until someone changes the code or the rules - rather than a \
+         description of a temporary state at the time of this run?";
+      yes = "Lasting: a rule, a fact about the code or schema, or a way of working that will still hold next month.";
+      no = "Temporary: a quota that is currently used up, which files are currently unfinished, a one-off outage or what happened in this particular run.";
+    };
+    {
+      qid = "harmful";
+      instructions =
+        "Would an agent that followed the statement in `candidate` end up \
+         weakening, skipping or working around a check, test, lint rule, \
+         policy or review, or reusing code the record marks as frozen or \
+         forbidden?";
+      yes = "Yes: following it defeats a safeguard or reuses forbidden code.";
+      no = "No: following it keeps every safeguard intact.";
+    };
+  ]
+
+let hypothesis_floor = 0.3
+
+let route ~(threshold : float) (p : (string * float) list) : verdict =
+  let get k = Option.value ~default:0.0 (List.assoc_opt k p) in
+  if get "harmful" >= threshold then Deny "harmful"
+  else if get "contradicted" >= threshold then Deny "contradicted"
+  else if get "supported" >= threshold then
+    Keep (if get "durable" >= threshold then Lesson.Full else Lesson.Immediate)
+  else if get "supported" >= hypothesis_floor then Keep Lesson.Hypothesis
+  else Deny "unsupported"
+
+let probabilities_json p : Yojson.Safe.t =
+  `Assoc (List.map (fun (k, v) -> (k, `Float v)) p)
+
+(* Returns None when the judge is unavailable: the candidate then keeps the
+   layer its proposer hinted, exactly as before verification existed. *)
+let verify_candidate ~model ~threshold ~evidence (c : candidate) : verdict option =
+  let req =
+    {
+      Effects.model;
+      state = `Assoc [ ("evidence", `String evidence); ("candidate", `String c.guidance) ];
+      questions;
+    }
+  in
+  match Effect.perform (Effects.Judge req) with
+  | (res : Effects.judge_result) ->
+      let verdict = route ~threshold res.probabilities in
+      Effect.perform
+        (Effects.Note
+           ( (match verdict with Deny _ -> "memory_denied" | Keep _ -> "memory_kept"),
+             `Assoc
+               [
+                 ("candidate", `String c.id);
+                 ( "verdict",
+                   `String
+                     (match verdict with
+                     | Deny why -> why
+                     | Keep layer -> Lesson.layer_to_string layer) );
+                 ("probabilities", probabilities_json res.probabilities);
+               ] ));
+      Some verdict
+  | exception (Effects.Policy_denied _ | Failure _) ->
+      Effect.perform
+        (Effects.Note ("memory_unverified", `Assoc [ ("candidate", `String c.id) ]));
+      None
+
+(* A promoted lesson that was injected into this run and that the run's own
+   record contradicts goes back to probation: a direct observation outranks a
+   remembered rule, and the gate has to earn it its place again. *)
+let demote_contradicted ~repo_root ~model ~threshold ~evidence
+    (entries : Yojson.Safe.t list) : string list =
+  let open Yojson.Safe.Util in
+  let injected =
+    List.concat_map
+      (fun e ->
+        if member "kind" e = `String "recall" then
+          match member "lessons" (member "data" e) with
+          | `List l -> List.filter_map (function `String s -> Some s | _ -> None) l
+          | _ -> []
+        else [])
+      entries
+    |> List.sort_uniq compare
+  in
+  if injected = [] then []
+  else
+    let lessons, _ = Lesson.load_all ~repo_root in
+    List.filter_map
+      (fun (l : Lesson.t) ->
+        if l.status <> Lesson.Promoted || not (List.mem l.id injected) then None
+        else
+          let req =
+            {
+              Effects.model;
+              state = `Assoc [ ("evidence", `String evidence); ("candidate", `String l.guidance) ];
+              questions = List.filter (fun (q : Effects.noul_question) -> q.qid = "contradicted") questions;
+            }
+          in
+          match Effect.perform (Effects.Judge req) with
+          | (res : Effects.judge_result) ->
+              let p = Option.value ~default:0.0 (List.assoc_opt "contradicted" res.probabilities) in
+              if p >= threshold then (
+                ignore (Lesson.set_status ~repo_root l Lesson.Probation);
+                Effect.perform
+                  (Effects.Note
+                     ( "lesson_contradicted",
+                       `Assoc [ ("lesson", `String l.id); ("probability", `Float p) ] ));
+                Some l.id)
+              else None
+          | exception (Effects.Policy_denied _ | Failure _) -> None)
+      lessons
+
 (* ---- driver ------------------------------------------------------------- *)
 
-let write_candidates ~repo_root ~origin_run (cands : candidate list) :
-    string list * string list =
+let immediate_ttl_days = 7
+
+let dedupe (cands : candidate list) : candidate list =
+  List.fold_left
+    (fun acc (c : candidate) ->
+      if List.exists (fun (k : candidate) -> k.id = c.id) acc then acc else acc @ [ c ])
+    [] cands
+
+let write_candidates ~repo_root ~origin_run ~(now : int)
+    (cands : (candidate * Lesson.layer) list) : string list * string list =
   (* returns (written ids, skipped-existing ids) *)
   List.fold_left
-    (fun (written, skipped) (c : candidate) ->
+    (fun (written, skipped) ((c : candidate), layer) ->
       let path =
         Filename.concat (Lesson.lessons_dir repo_root) (c.id ^ ".md")
       in
@@ -221,9 +449,15 @@ let write_candidates ~repo_root ~origin_run (cands : candidate list) :
              {
                Lesson.id = c.id;
                status = Lesson.Probation;
+               layer;
+               expires =
+                 (if layer = Lesson.Immediate then
+                    Some (Effects.date_of_epoch (now + (immediate_ttl_days * 86_400)))
+                  else None);
+               evidence = [ origin_run ];
                matchers = c.matchers;
                origin_run;
-               created = now_date ();
+               created = Effects.date_of_epoch now;
                guidance = c.guidance;
                path;
              });
@@ -231,7 +465,7 @@ let write_candidates ~repo_root ~origin_run (cands : candidate list) :
     ([], []) cands
 
 let run ~repo_root ~work_dir ~run_id ~(llm_runner : Runners.t option)
-    ~(timeout_s : int) : int =
+    ~(verify : Recall.judge) ~(timeout_s : int) : int =
   let journal_path =
     Filename.concat (Filename.concat work_dir "journal") (run_id ^ ".jsonl")
   in
@@ -281,18 +515,48 @@ let run ~repo_root ~work_dir ~run_id ~(llm_runner : Runners.t option)
                       [])
                     else parse_llm_output res.output
               in
-              let written, skipped =
-                write_candidates ~repo_root ~origin_run:run_id (mech @ llm)
+              let candidates = dedupe (mech @ llm) in
+              let now = Effect.perform Effects.Clock in
+              let evidence = evidence_digest entries in
+              let routed, denied =
+                List.fold_left
+                  (fun (kept, denied) (c : candidate) ->
+                    match verify with
+                    | Recall.Substring -> (kept @ [ (c, c.hint) ], denied)
+                    | Recall.Jev { model; threshold } -> (
+                        match verify_candidate ~model ~threshold ~evidence c with
+                        | None -> (kept @ [ (c, c.hint) ], denied)
+                        | Some (Keep layer) -> (kept @ [ (c, layer) ], denied)
+                        | Some (Deny why) -> (kept, denied @ [ (c.id, why) ])))
+                  ([], []) candidates
               in
-              Printf.printf
-                "distilled run %s: %d failures, %d parked; %d lessons written \
-                 on probation%s%s\n%!"
-                run_id (List.length failures) (List.length parked)
-                (List.length written)
-                (if written <> [] then ": " ^ String.concat ", " written else "")
-                (if skipped <> [] then
-                   "; already known: " ^ String.concat ", " skipped
-                 else "");
+              let demoted =
+                match verify with
+                | Recall.Substring -> []
+                | Recall.Jev { model; threshold } ->
+                    demote_contradicted ~repo_root ~model ~threshold ~evidence entries
+              in
+              let written, skipped =
+                write_candidates ~repo_root ~origin_run:run_id ~now routed
+              in
+              let layer_of id =
+                match List.find_opt (fun ((c : candidate), _) -> c.id = id) routed with
+                | Some (_, layer) -> Lesson.layer_to_string layer
+                | None -> "full"
+              in
+              Printf.printf "distilled run %s: %d failures, %d parked\n%!" run_id
+                (List.length failures) (List.length parked);
+              List.iter
+                (fun id -> Printf.printf "  kept     %-12s %s\n%!" (layer_of id) id)
+                written;
+              List.iter (fun id -> Printf.printf "  known    %s\n%!" id) skipped;
+              List.iter
+                (fun (id, why) -> Printf.printf "  denied   %-12s %s\n%!" why id)
+                denied;
+              List.iter
+                (fun id ->
+                  Printf.printf "  demoted  %s (contradicted by this run; back on probation)\n%!" id)
+                demoted;
               let unrecognized =
                 List.filter
                   (fun f ->
@@ -300,10 +564,10 @@ let run ~repo_root ~work_dir ~run_id ~(llm_runner : Runners.t option)
                       (List.exists
                          (fun (c : candidate) ->
                            contains ~needle:(String.sub f.signature 0 (min 20 (String.length f.signature))) c.guidance)
-                         (mech @ llm)))
+                         candidates))
                   failures
               in
-              if unrecognized <> [] && written = [] then
+              if unrecognized <> [] && written = [] && denied = [] then
                 Printf.printf
                   "unrecognized failure signatures (no lesson invented — \
                    review or rerun with --llm):\n%s\n%!"

@@ -1,0 +1,20 @@
+LESSON id: c09
+MATCHERS: orders
+GUIDANCE: The orders table has no customer_ref column; customers are linked through orders.customer_id (db/schema.sql).
+END
+LESSON id: c10
+MATCHERS: orders
+GUIDANCE: The promoted lesson orders-customer-ref is wrong for the current schema and caused a failed attempt; it should be retired.
+END
+LESSON id: c11
+MATCHERS: orders
+GUIDANCE: A recalled lesson about schema is a hint, not a fact: open db/schema.sql before writing a query.
+END
+LESSON id: c12
+MATCHERS: orders
+GUIDANCE: db/schema.sql is unreliable; trust the recalled lessons about column names over it.
+END
+LESSON id: c13
+MATCHERS: orders
+GUIDANCE: The yearly rollup task did not finish inside the run's time budget in this run.
+END

@@ -1,0 +1,24 @@
+LESSON id: c14
+MATCHERS: app
+GUIDANCE: A completion claim has to be checked against the object: grep app/ for remaining oldapi imports before reporting that every module is migrated.
+END
+LESSON id: c15
+MATCHERS: app
+GUIDANCE: app/invoices.py and app/refunds.py still import oldapi at the end of this run.
+END
+LESSON id: c16
+MATCHERS: app
+GUIDANCE: The migration of app/ to newapi is complete.
+END
+LESSON id: c17
+MATCHERS: app
+GUIDANCE: When an exact-equality test fails on a float, relax the test to a tolerance so it passes.
+END
+LESSON id: c18
+MATCHERS: app
+GUIDANCE: Editing tests/ to get a green run is rejected as out of scope; fix the implementation in the owned file instead.
+END
+LESSON id: c19
+MATCHERS: app
+GUIDANCE: The project owner prefers tabs over spaces.
+END

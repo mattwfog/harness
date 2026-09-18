@@ -186,6 +186,12 @@ let run (c : cursor) (fn : unit -> 'a) : 'a =
                     ~req_json:(Effects.git_commit_req_json req)
                     ~decode:(fun d -> { Effects.sha = str "sha" d })
                     k)
+          | Effects.Clock ->
+              Some
+                (fun (k : (b, _) continuation) ->
+                  answer c ~kind:"clock" ~req_json:Effects.clock_req_json
+                    ~decode:(fun d -> int_field "epoch" d)
+                    k)
           | Effects.Judge req ->
               Some
                 (fun (k : (b, _) continuation) ->

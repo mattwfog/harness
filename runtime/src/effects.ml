@@ -60,6 +60,9 @@ type _ Effect.t +=
   | File_write : write_req -> unit Effect.t
   | Git_commit : commit_req -> commit_result Effect.t
   | Judge : judge_req -> judge_result Effect.t
+  | Clock : int Effect.t
+      (* UTC epoch seconds. Time is world state: memory that expires must
+         expire the same way on replay as it did in the recorded run. *)
   | Note : (string * Yojson.Safe.t) -> unit Effect.t
 
 exception Policy_denied of { effect_kind : string; reason : string }
@@ -166,3 +169,11 @@ let judge_result_of_json (d : Yojson.Safe.t) : judge_result =
     input_tokens = int_of (member "input_tokens" d);
     output_tokens = int_of (member "output_tokens" d);
   }
+
+let clock_req_json : Yojson.Safe.t = `Assoc []
+let clock_result_json (epoch : int) : Yojson.Safe.t = `Assoc [ ("epoch", `Int epoch) ]
+
+let date_of_epoch (epoch : int) : string =
+  let tm = Unix.gmtime (float_of_int epoch) in
+  Printf.sprintf "%04d-%02d-%02d" (tm.Unix.tm_year + 1900) (tm.Unix.tm_mon + 1)
+    tm.Unix.tm_mday

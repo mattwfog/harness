@@ -79,6 +79,11 @@ let run (j : Journal.t) (fn : unit -> 'a) : 'a =
                     ~res_json:(fun (r : Effects.commit_result) ->
                       `Assoc [ ("sha", `String r.sha) ])
                     eff k)
+          | Effects.Clock ->
+              Some
+                (fun (k : (b, _) continuation) ->
+                  captured ~kind:"clock" ~req_json:Effects.clock_req_json
+                    ~res_json:Effects.clock_result_json eff k)
           | Effects.Judge req ->
               Some
                 (fun (k : (b, _) continuation) ->

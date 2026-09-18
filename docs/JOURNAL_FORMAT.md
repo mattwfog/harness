@@ -158,6 +158,13 @@ credential never appears in a request, a result, or a log. Replay answers a
 `judge` request from this recorded result, so a probabilistic service does not
 make a recorded run non-reproducible.
 
+### `clock`
+
+Request `data` is `{}`; result `data` is `{"epoch": <UTC seconds>}`. Recall reads
+the clock only when an immediate memory's expiry has to be checked, and distill
+reads it to date and expire what it writes, so both replay with the recorded
+time.
+
 ### Notes
 
 Notes have phase `note`, use their arbitrary label as `kind`, and preserve the
@@ -168,6 +175,10 @@ Notes the fleet program emits include `recall` (lessons injected),
 `recall_judge_unavailable` (the judge was denied or failed; substring recall
 was used), `scope_violation` (tracked files changed outside the task's owned
 paths, with the paths) and `scope_strays` (new untracked files outside them).
+Distill emits `memory_kept` and `memory_denied` (candidate id, verdict — a layer,
+or `harmful` / `contradicted` / `unsupported` — and the four probabilities),
+`memory_unverified` (the judge was unavailable; the proposer's own layer hint
+was used) and `lesson_contradicted` (a promoted lesson sent back to probation).
 
 ### Denials for any paired kind
 

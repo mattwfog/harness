@@ -78,6 +78,42 @@ agent task program
   recall-first wording stays: a missed lesson repeats a known failure, an extra
   one only costs tokens. It is a small set labelled by the author, and judge
   scores vary slightly between calls — rerun it on your own lessons.
+- **Memory has layers, and a verifier at the door.** What a run teaches is not
+  all the same kind of thing. **Full-term** lessons are lasting rules and
+  facts: born on probation, promoted only by the measured gate. **Immediate**
+  memories are true now and not for long — a quota that is used up, what a run
+  left unfinished: they carry an expiry, are recalled until it passes with no
+  gate (a fact does not need an experiment), and then stop. A **hypothesis** is
+  plausible but was not shown by the record it came from: kept with its
+  evidence, never put in a prompt. Time is an effect (`Clock`), so expiry
+  replays exactly.
+
+  `harness distill --verify jev` decides which of these a candidate is. Each
+  candidate — from the mechanical lane or an LLM proposer — is checked against
+  a task-by-task digest of the run's journal with four independent judgments:
+  *supported* by the record, *contradicted* by it, *lasting* or temporary,
+  *harmful* (would following it weaken a check or reuse forbidden code).
+  Harmful, contradicted or unsupported candidates are denied and the reason is
+  journaled; the rest are routed to a layer. A promoted lesson that was
+  injected into the run and that the run's own record contradicts goes back
+  to probation: an observation outranks a memory until the gate re-earns it.
+
+  [`evals/memory-routing/`](evals/memory-routing/) fabricates three bad
+  sessions as real journals — an agent that copies a frozen legacy module as
+  "the existing analog" and then inlines it to dodge lint, one that trusts a
+  stale promoted lesson over the schema file, one that reports a migration
+  complete with modules left and "fixes" a test by loosening it — and hands
+  the distiller 19 candidate memories a proposer might write. Without
+  verification every one of them would be written (9 of 19 belong where they
+  would land). With it, 18 of 19 land where the hand labels say (~29k judge
+  tokens): all seven poison or invented candidates denied ("inline the legacy
+  body" harmful 0.92, "relax the test tolerance" 0.90, an invented missing
+  token contradicted 0.89), all three temporary facts kept out of full-term
+  memory, and the stale lesson demoted. The miss is a cross-task causal claim
+  the record does not state outright: 0.38 supported, and denied on a
+  borderline harmful score (0.55) where a hypothesis would have been the right
+  landing. Small set, author's labels, scores vary slightly between
+  calls.
 - **Scope audit.** Policy bounds what the harness does; the agent itself is a
   subprocess that can write anywhere. The harness snapshots the dirty set
   before a task and after each attempt. A tracked file modified or deleted
@@ -92,7 +128,7 @@ harness run     --repo DIR [--runner kimi|codex|cmd:<shell>] [--recall-judge jev
 harness status  --repo DIR RUN_ID
 harness journal --repo DIR RUN_ID
 harness replay  --repo DIR --runner codex RUN_ID tasks/001-readme.md
-harness distill --repo DIR RUN_ID            # journal -> probationary lessons
+harness distill --repo DIR [--verify jev] RUN_ID   # journal -> verified, layered memories
 harness lessons --repo DIR                   # list the lesson corpus and statuses
 harness gate    --repo DIR --runner codex LESSON_ID EVAL.md…   # eval tasks use the same task format
 ```
@@ -151,7 +187,7 @@ OCaml 5.3 with dune; Python ≥ 3.12, standard library only.
 ```sh
 opam switch create harness 5.3.0 && eval "$(opam env --switch=harness)"
 opam install . --deps-only --with-test
-dune build && dune test          # runtime: 26 tests · verdict: 18 tests incl. Python parity
+dune build && dune test          # runtime: 30 tests · verdict: 18 tests incl. Python parity
 cd python && python3 -m pytest -q   # 78 tests
 ```
 
@@ -163,7 +199,7 @@ done. [`tasks/`](tasks/) holds the two task specs the harness ran on itself
 (its first README and the journal-format doc).
 
 Working today: the runtime (effects, journal, replay, revert, fleet program,
-distill, promotion gate, judged recall, scope audit) and the verdict layer (Python end to end; OCaml
+distill with verified, layered memory, promotion gate, judged recall, scope audit) and the verdict layer (Python end to end; OCaml
 validate / matrix / detect / report / gate with parity tests).
 
 Next: the two layers are not yet joined. The promotion gate still scores with

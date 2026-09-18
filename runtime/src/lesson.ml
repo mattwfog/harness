@@ -18,9 +18,32 @@ let status_of_string = function
   | "retired" -> Ok Retired
   | s -> Error (Printf.sprintf "unknown lesson status %s" s)
 
+(* Memory has layers. FULL-TERM lessons are lasting rules and facts: born on
+   probation, promoted only by the measured gate. IMMEDIATE memories are true
+   right now and not for long (a quota that is used up, what a run left
+   unfinished): they carry an expiry and are recalled until it passes, with no
+   gate, because a fact does not need an experiment. A HYPOTHESIS is plausible
+   but was not shown by the record it came from: kept with its evidence, never
+   injected into a prompt. *)
+type layer = Full | Immediate | Hypothesis
+
+let layer_to_string = function
+  | Full -> "full"
+  | Immediate -> "immediate"
+  | Hypothesis -> "hypothesis"
+
+let layer_of_string = function
+  | "full" -> Ok Full
+  | "immediate" -> Ok Immediate
+  | "hypothesis" -> Ok Hypothesis
+  | s -> Error (Printf.sprintf "unknown lesson layer %s" s)
+
 type t = {
   id : string;
   status : status;
+  layer : layer;
+  expires : string option; (* UTC date YYYY-MM-DD; immediate memories only *)
+  evidence : string list; (* run ids the memory was derived from *)
   matchers : string list; (* case-insensitive substrings; any hit = recall *)
   origin_run : string;
   created : string;
@@ -40,6 +63,21 @@ let render (l : t) : string =
         (String.concat ", " (List.map (Printf.sprintf "%S") l.matchers));
       Printf.sprintf "origin_run = %S" l.origin_run;
       Printf.sprintf "created = %S" l.created;
+    ]
+  ^ (match l.layer with
+    | Full -> ""
+    | layer -> Printf.sprintf "\nlayer = %S" (layer_to_string layer))
+  ^ (match l.expires with
+    | None -> ""
+    | Some date -> Printf.sprintf "\nexpires = %S" date)
+  ^ (match l.evidence with
+    | [] -> ""
+    | runs ->
+        Printf.sprintf "\nevidence = [%s]"
+          (String.concat ", " (List.map (Printf.sprintf "%S") runs)))
+  ^ "\n"
+  ^ String.concat "\n"
+    [
       "+++";
       "";
       l.guidance;
@@ -63,17 +101,28 @@ let parse_string ~path text : (t, string) result =
           | Some id, Some status_s, Some matchers -> (
               match status_of_string status_s with
               | Error e -> Error (Printf.sprintf "%s: %s" path e)
-              | Ok status ->
+              | Ok status -> (
+                  let layer =
+                    match str "layer" with
+                    | None -> Ok Full
+                    | Some s -> layer_of_string s
+                  in
+                  match layer with
+                  | Error e -> Error (Printf.sprintf "%s: %s" path e)
+                  | Ok layer ->
                   Ok
                     {
                       id;
                       status;
+                      layer;
+                      expires = str "expires";
+                      evidence = Option.value ~default:[] (str_list "evidence");
                       matchers;
                       origin_run = Option.value ~default:"" (str "origin_run");
                       created = Option.value ~default:"" (str "created");
                       guidance = String.trim (String.concat "+++\n" rest);
                       path;
-                    })
+                    }))
           | _ ->
               Error
                 (Printf.sprintf "%s: lesson missing id/status/matchers" path)))

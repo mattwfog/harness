@@ -344,6 +344,10 @@ let run (cfg : config) (fn : unit -> 'a) : 'a =
                   match git_commit cfg req with
                   | res -> continue k res
                   | exception e -> discontinue k e)
+          | Effects.Clock ->
+              Some
+                (fun (k : (b, _) continuation) ->
+                  continue k (int_of_float (Unix.gettimeofday ())))
           | Effects.Judge req ->
               Some
                 (fun (k : (b, _) continuation) ->

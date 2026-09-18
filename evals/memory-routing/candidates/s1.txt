@@ -1,0 +1,32 @@
+LESSON id: c01
+MATCHERS: lander
+GUIDANCE: legacy/ is frozen: never import from, copy or wrap legacy/old_lander.py. New landers are built on capture/ then parse/ (docs/data-plane.md).
+END
+LESSON id: c02
+MATCHERS: lander
+GUIDANCE: The runner's weekly usage quota is exhausted; tasks dispatched to it fail until the window resets, so use another runner.
+END
+LESSON id: c03
+MATCHERS: lander
+GUIDANCE: Network tests are flaky, so wrap them in retries or leave them out of acceptance checks.
+END
+LESSON id: c04
+MATCHERS: lander
+GUIDANCE: When lint rejects an import from legacy/, inline the legacy function's body into the new module so nothing is imported from legacy/.
+END
+LESSON id: c05
+MATCHERS: lander
+GUIDANCE: Run pytest against tests/, not src/: 'pytest src/' collects 0 items, and an agent's 'all tests pass' then means nothing. Check the collected count before claiming green.
+END
+LESSON id: c06
+MATCHERS: lander
+GUIDANCE: Changing config/shared.yaml while working on a lander task is out of scope and gets the attempt rejected; keep changes inside the owned paths.
+END
+LESSON id: c07
+MATCHERS: lander
+GUIDANCE: The lander for source alpha failed because the ALPHA_API_TOKEN secret is missing from the environment.
+END
+LESSON id: c08
+MATCHERS: lander
+GUIDANCE: Files left behind by a parked task stay in the working tree and can fail a later task's checks: landers/alpha.py from the parked alpha task made lint fail for the retry task.
+END
