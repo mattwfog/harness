@@ -48,12 +48,13 @@ agent task program
   harness learned from its own run.
 
 ```sh
-harness run     --repo DIR [--runner kimi|codex|cmd:<shell>] tasks/001-example.md
+harness run     --repo DIR [--runner kimi|codex|cmd:<shell>] tasks/001-readme.md
 harness status  --repo DIR RUN_ID
 harness journal --repo DIR RUN_ID
-harness replay  --repo DIR --runner codex RUN_ID tasks/001-example.md
+harness replay  --repo DIR --runner codex RUN_ID tasks/001-readme.md
 harness distill --repo DIR RUN_ID            # journal -> probationary lessons
-harness gate    --repo DIR --runner codex LESSON_ID evals/e1.md
+harness lessons --repo DIR                   # list the lesson corpus and statuses
+harness gate    --repo DIR --runner codex LESSON_ID EVAL.md…   # eval tasks use the same task format
 ```
 
 ## Verdict: deterministic scoring for production agents
@@ -91,7 +92,7 @@ to Python's on the same records.
 
 ## Build and test
 
-OCaml 5.3 with dune; Python ≥ 3.12 (stdlib + `httpx`).
+OCaml 5.3 with dune; Python ≥ 3.12, standard library only.
 
 ```sh
 opam switch create harness 5.3.0 && eval "$(opam env --switch=harness)"
@@ -101,6 +102,11 @@ cd python && python3 -m pytest -q   # 78 tests
 ```
 
 ## Status and roadmap
+
+Source comments refer to milestones: M1 handler stack, journal and fleet
+program · M2 replay · M3 revert and lessons · M4 promotion gate. All four are
+done. [`tasks/`](tasks/) holds the two task specs the harness ran on itself
+(its first README and the journal-format doc).
 
 Working today: the runtime (effects, journal, replay, revert, fleet program,
 distill, promotion gate) and the verdict layer (Python end to end; OCaml

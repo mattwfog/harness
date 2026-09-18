@@ -1,6 +1,6 @@
 (* Resumable run state, persisted atomically (tmp + rename) on every task
    transition — a killed run resumes without re-spending agent quota on
-   finished work (dispatch.py RunState, ported). *)
+   finished work. *)
 
 type t = {
   run_id : string;

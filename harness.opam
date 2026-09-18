@@ -3,7 +3,7 @@ opam-version: "2.0"
 synopsis:
   "Agent runtime: every agent action is an algebraic effect; the harness is the handler stack"
 depends: [
-  "ocaml"
+  "ocaml" {>= "5.1"}
   "dune" {>= "3.11"}
   "cmdliner"
   "yojson"

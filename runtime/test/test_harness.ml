@@ -7,16 +7,16 @@ open Harness_lib
 
 let fixture name = Filename.concat "fixtures" name
 
-(* -- task_spec: byte-compat with a REAL devondb fleet task file ---------- *)
+(* -- task_spec: byte-compat with a real-world task file ---------- *)
 
-let test_parse_devondb_spec () =
-  match Task_spec.parse_file (fixture "devondb-001-types-error-enum.md") with
+let test_parse_example_spec () =
+  match Task_spec.parse_file (fixture "example-001-error-enum.md") with
   | Error e -> Alcotest.fail e
   | Ok t ->
       Alcotest.(check string) "id" "001" t.id;
-      Alcotest.(check string) "title" "devondb-types: workspace error type" t.title;
-      Alcotest.(check (list string)) "owns" [ "crates/devondb-types/src" ] t.owns;
-      Alcotest.(check string) "packages" "devondb-types" (List.hd t.packages);
+      Alcotest.(check string) "title" "graphdb-types: workspace error type" t.title;
+      Alcotest.(check (list string)) "owns" [ "crates/graphdb-types/src" ] t.owns;
+      Alcotest.(check string) "packages" "graphdb-types" (List.hd t.packages);
       Alcotest.(check string) "commit_type" "feat" t.commit_type;
       Alcotest.(check bool) "acceptance mentions cargo" true
         (String.length t.acceptance > 0);
@@ -613,8 +613,8 @@ let () =
     [
       ( "task_spec",
         [
-          Alcotest.test_case "parses real devondb fleet spec" `Quick
-            test_parse_devondb_spec;
+          Alcotest.test_case "parses real-world task spec" `Quick
+            test_parse_example_spec;
           Alcotest.test_case "rejects missing keys" `Quick
             test_parse_rejects_missing_keys;
         ] );

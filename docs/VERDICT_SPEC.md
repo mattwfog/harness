@@ -47,7 +47,7 @@ P6 **Provenance discipline (the tellbench bar).** Every reported number
 
 ## The five composable contracts (what makes it world-portable)
 
-C1 **Record** (`record.schema.json`, versioned) — one JSON object per
+C1 **Record** (`python/src/dispobench/core/schemas.py`, `verdict/lib/record.ml`; versioned) — one JSON object per
    episode: `key, scenario_id, family (row), rep, variant, model,
    base_url, prompt_hash, system_prompt, history, tool_calls[{name,
    arguments, result, status, duration_ms}], result{terminal, action,
@@ -55,7 +55,7 @@ C1 **Record** (`record.schema.json`, versioned) — one JSON object per
    finished_at, manifest_ref`. The record is the ONLY thing detectors and
    reports may read. Any agent that can emit this record can be evaluated.
 
-C2 **Corpus** (`corpus.schema.json`) — scrubbed conversations with one
+C2 **Corpus** (`Corpus` in `core/schemas.py`) — scrubbed conversations with one
    MECE row label each + a machine-checkable scrub gate (leak census must
    read 0 before a corpus is accepted). Scenario derivation: every
    human-reference reply point becomes a scenario (input = history up to
@@ -76,15 +76,15 @@ C4 **Detector** — `def detect(record) -> bool | None` (None = not
    configurable rules); app-specific detectors register from the adapter
    side.
 
-C5 **Matrix + Lock** (`matrix.schema.json`, `shaping.lock`) — the two
+C5 **Matrix + Lock** (`Matrix` in `core/schemas.py`, `verdict/lib/matrix.ml`; `shaping.lock`) — the two
    partitions with tags/origin metadata per column group; the lock =
    {hash of the declared shaping-file set, run, date}; a gate CLI
    (`dispobench gate`) suitable for any repo's pre-push hook.
 
-## Architecture (package = Codex work-package boundary)
+## Architecture
 
 ```
-src/dispobench/
+python/src/dispobench/
   core/        C1/C2/C5 schemas, validation, manifest, lock, hashing
   runner/      seeded selection, k-reps, per-record persist+resume,
                Retry-After pacing, budget caps, smoke gate
@@ -94,10 +94,10 @@ src/dispobench/
   cli.py       dispobench {run, report, gate, matrix, validate, smoke}
 tests/         one suite per package; determinism tests (same records →
                byte-identical report); MECE enforcement tests
-docs/          this spec, per-contract reference, integration guide
+docs/          this spec and the integration guide
 ```
 
-Stdlib-only + `httpx` allowed; no framework. Python ≥3.12. Every package
+Standard library only; no framework. Python ≥3.12. Every package
 carries its own tests; `pytest` green is the merge bar.
 
 ## What "better than tellbench" means, concretely

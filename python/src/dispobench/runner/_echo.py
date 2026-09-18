@@ -62,7 +62,7 @@ class EchoAdapter:
             "tool_calls": [],
             "result": {"terminal": True, "action": None, "reply": str(reply)},
             "usage": {"input": 0, "cached": 0, "output": 0},
-            "nudges": [],
+            "nudges": 0,
             "seed": seed,
             "wall_ms": 0,
             "finished_at": "1970-01-01T00:00:00Z",

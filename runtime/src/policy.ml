@@ -4,7 +4,7 @@
    runner's own sandbox flags plus the repo's standing orders (AGENTS.md) —
    stated honestly, not implied otherwise.
 
-   House git law encoded below:
+   Project git policy encoded below:
    never push, never rewrite history, never checkout/restore to unwind
    edits, pathspec-only commits. *)
 

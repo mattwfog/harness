@@ -1,6 +1,5 @@
 (* Disjoint-ownership validation: two concurrent tasks may never own
-   overlapping paths, because all agents share one checkout on main
-   (dispatch.py check_disjoint, ported). *)
+   overlapping paths, because all agents in a run share one checkout. *)
 
 let overlap a b =
   let a = Filename.concat "" a and b = Filename.concat "" b in

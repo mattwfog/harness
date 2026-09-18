@@ -1,4 +1,4 @@
-(* Prompt assembly (dispatch.py build_prompt, generalized): mission + owned
+(* Prompt assembly (generalized from the Python dispatcher): mission + owned
    paths + acceptance + repo standing orders + recalled lessons + failure
    context from a prior failed attempt. The lessons slot is the recall wire
    the M3 learning loop feeds; it exists (and is journaled) from day one. *)

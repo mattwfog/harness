@@ -10,7 +10,7 @@
    Honest scope: this reverts File_write effects only. Tool_exec side
    effects (an agent subprocess's own writes) are not harness-mediated and
    are NOT reverted — that boundary is the runner sandbox's. Git commits
-   are never reverted (house law: fix forward); a Git_commit inside the
+   are never reverted (policy: fix forward); a Git_commit inside the
    scope CLEARS the undo log — committed work is kept. *)
 
 open Effect

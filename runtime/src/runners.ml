@@ -1,6 +1,6 @@
 (* Agent runtimes. kimi is the default lane (`kimi -p` is its
    autonomous agentic mode);
-   codex is the fleet's proven second lane; Cmd is a scriptable runner for
+   codex is the second supported runner; Cmd is a scriptable runner for
    tests and smoke runs — it receives the prompt in $HARNESS_PROMPT. *)
 
 type t = Kimi | Codex | Cmd of string

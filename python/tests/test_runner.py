@@ -152,6 +152,9 @@ def test_echo_adapter_implements_protocol_and_emits_complete_record() -> None:
         )
     )
 
+    from dispobench.core import Record
+
+    Record.from_dict(record)  # the echo record must satisfy the Record contract
     assert record["key"] == "record-1"
     assert record["rep"] == 2
     assert record["seed"] == 99
